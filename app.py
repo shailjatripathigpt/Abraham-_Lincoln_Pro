@@ -21,8 +21,9 @@ FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
 META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
 CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
-# HF Router API (NEW)
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/microsoft/Phi-3-mini-4k-instruct"
+# ✅ Mistral model (stable)
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3"
+
 HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 
 SYSTEM_PROMPT = """You are a strict retrieval QA assistant.
@@ -188,3 +189,4 @@ ANSWER:
 
 if __name__ == "__main__":
     main()
+
