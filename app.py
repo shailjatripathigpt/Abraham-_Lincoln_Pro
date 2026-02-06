@@ -1,19 +1,12 @@
 import json
 from pathlib import Path
-from typing import Dict, Any
-
 import numpy as np
 import requests
 import streamlit as st
 import gdown
 import os
 
-try:
-    import faiss
-except:
-    st.error("faiss-cpu not installed")
-    raise
-
+import faiss
 from sentence_transformers import SentenceTransformer
 
 
@@ -23,18 +16,18 @@ from sentence_transformers import SentenceTransformer
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 FINAL_K = 5
 
-# Google Drive IDs
+# Google Drive file IDs
 FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
 META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
 CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
-# HuggingFace API
-HF_API_URL = "https://api-inference.huggingface.co/models/microsoft/Phi-3-mini-4k-instruct"
+# HF Router API (NEW)
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/microsoft/Phi-3-mini-4k-instruct"
 HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 
 SYSTEM_PROMPT = """You are a strict retrieval QA assistant.
-Answer ONLY from context.
-If not found say:
+Answer ONLY from the provided context.
+If not found, reply exactly:
 Not found in provided documents.
 """
 
@@ -67,7 +60,7 @@ def iter_jsonl(path: Path):
 
 
 # =========================
-# LOAD RAG
+# LOAD RAG RESOURCES
 # =========================
 @st.cache_resource
 def load_resources():
@@ -80,7 +73,7 @@ def load_resources():
     meta_path = emb / "chunks_meta.jsonl"
     chunks_path = ch / "all_chunks.jsonl"
 
-    download_from_drive(FAISS_FILE_ID, index_path, "FAISS")
+    download_from_drive(FAISS_FILE_ID, index_path, "FAISS index")
     download_from_drive(META_FILE_ID, meta_path, "Metadata")
     download_from_drive(CHUNKS_FILE_ID, chunks_path, "Chunks")
 
@@ -94,7 +87,7 @@ def load_resources():
 
 
 # =========================
-# RETRIEVE
+# RETRIEVAL
 # =========================
 def retrieve(index, meta, texts, model, query):
 
@@ -105,7 +98,9 @@ def retrieve(index, meta, texts, model, query):
     for score, idx in zip(D[0], I[0]):
         if idx < len(meta):
             cid = meta[idx]["chunk_id"]
-            results.append(texts.get(cid, ""))
+            txt = texts.get(cid)
+            if txt:
+                results.append(txt)
 
     return results
 
@@ -115,7 +110,10 @@ def retrieve(index, meta, texts, model, query):
 # =========================
 def hf_generate(prompt):
 
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
     payload = {
         "inputs": prompt,
@@ -126,17 +124,22 @@ def hf_generate(prompt):
         },
     }
 
-    r = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
+    r = requests.post(
+        HF_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=120,
+    )
 
     if r.status_code != 200:
         return f"HF API Error: {r.text}"
 
     data = r.json()
 
-    if isinstance(data, list):
+    if isinstance(data, list) and len(data) > 0:
         return data[0]["generated_text"]
 
-    return "No response."
+    return str(data)
 
 
 # =========================
@@ -148,7 +151,7 @@ def main():
     st.title("🇺🇸 Abraham Lincoln RAG Chatbot")
 
     if not HF_TOKEN:
-        st.error("HF token missing in secrets!")
+        st.error("HF_TOKEN missing in Streamlit secrets!")
         st.stop()
 
     index, meta, texts, model = load_resources()
@@ -176,7 +179,7 @@ QUESTION:
 ANSWER:
 """
 
-        with st.spinner("Generating..."):
+        with st.spinner("Generating answer..."):
             ans = hf_generate(prompt)
 
         st.write("### Answer")
