@@ -1,0 +1,8 @@
+embeddings/
+chunks/
+normalized/
+rag_history/
+data/loc_papers/
+
+*.faiss
+*.jsonl

@@ -1,0 +1,243 @@
+{
+  "created_at": "2026-02-04T06:40:33.730680+00:00",
+  "scan_source": "Wikipedia JSON Dump",
+  "documents": 26,
+  "records": 26,
+  "metadata_index": {
+    "json_lincoln_1_1_ed7d8beec568": {
+      "book_title": "The Gettysburg Address by Abraham Lincoln",
+      "author_name": "these honored dead we take increased devotion",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_1_1_ed7d8beec568",
+      "source_url": "https://www.abrahamlincolnonline.org/lincoln/speeches/gettysburg.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_2_1_d696d347670a": {
+      "book_title": "\"House Divided\" Speech by Abraham Lincoln",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_2_1_d696d347670a",
+      "source_url": "https://www.abrahamlincolnonline.org/lincoln/speeches/house.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_3_1_231a9177f008": {
+      "book_title": "Abraham Lincoln's Lyceum Address",
+      "author_name": "a struggling pioneer village",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_3_1_231a9177f008",
+      "source_url": "https://www.abrahamlincolnonline.org/lincoln/speeches/lyceum.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_32_1_56f044083d3a": {
+      "book_title": "Page Not Found | Miller Center",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_32_1_56f044083d3a",
+      "source_url": "https://millercenter.org/the-presidency/presidential-speeches/gettysburg-address",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_33_1_a96b0a216fb4": {
+      "book_title": "Page Not Found | Miller Center",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_33_1_a96b0a216fb4",
+      "source_url": "https://millercenter.org/the-presidency/presidential-speeches/first-inaugural-address-1861",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_34_1_cde696dff088": {
+      "book_title": "Page Not Found | Miller Center",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_34_1_cde696dff088",
+      "source_url": "https://millercenter.org/the-presidency/presidential-speeches/second-inaugural-address-1865",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_35_1_5d1f11debc9a": {
+      "book_title": "The Emancipation Proclamation | National Archives",
+      "author_name": "the first days of the Civil War, slaves had acted",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_35_1_5d1f11debc9a",
+      "source_url": "https://www.archives.gov/exhibits/featured-documents/emancipation-proclamation",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_36_1_55be314341e0": {
+      "book_title": "Page Not Found | National Archives",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_36_1_55be314341e0",
+      "source_url": "https://www.archives.gov/milestone-documents/gettysburg-address",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_4_1_13fe83903ea6": {
+      "book_title": "Abraham Lincoln's Cooper Union Address",
+      "author_name": "all taint of opposition",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_4_1_13fe83903ea6",
+      "source_url": "https://www.abrahamlincolnonline.org/lincoln/speeches/cooper.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_42_1_1057a2939484": {
+      "book_title": "Papers Of Abraham Lincoln",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_42_1_1057a2939484",
+      "source_url": "https://papersofabrahamlincoln.org/documents/D200001",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_43_1_3154ee870a81": {
+      "book_title": "Papers Of Abraham Lincoln",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_43_1_3154ee870a81",
+      "source_url": "https://papersofabrahamlincoln.org/documents/D200002",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_44_1_a5d1b59820ef": {
+      "book_title": "Papers Of Abraham Lincoln",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_44_1_a5d1b59820ef",
+      "source_url": "https://papersofabrahamlincoln.org/documents/D200003",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_45_1_e0feebdfac1d": {
+      "book_title": "Papers Of Abraham Lincoln",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_45_1_e0feebdfac1d",
+      "source_url": "https://papersofabrahamlincoln.org/documents/D200004",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_46_1_780ef92fbe3a": {
+      "book_title": "Papers Of Abraham Lincoln",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_46_1_780ef92fbe3a",
+      "source_url": "https://papersofabrahamlincoln.org/documents/D200005",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_47_1_a9539fb99410": {
+      "book_title": "The Avalon Project : First Inaugural Address of Abraham Lincoln",
+      "author_name": "these views that no State upon its own mere motion can lawfully get out of the Union; that resolves and ordinances",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_47_1_a9539fb99410",
+      "source_url": "https://avalon.law.yale.edu/19th_century/lincoln1.asp",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_48_1_39490505b43b": {
+      "book_title": "The Avalon Project : Second Inaugural Address of Abraham Lincoln",
+      "author_name": "this place, devoted altogether",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_48_1_39490505b43b",
+      "source_url": "https://avalon.law.yale.edu/19th_century/lincoln2.asp",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_5_1_81d2b8877071": {
+      "book_title": "Abraham Lincoln's Farewell Address",
+      "author_name": "a young",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_5_1_81d2b8877071",
+      "source_url": "https://www.abrahamlincolnonline.org/lincoln/speeches/farewell.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_51_1_7f542003d23e": {
+      "book_title": "Page Not Found | American Battlefield Trust",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_51_1_7f542003d23e",
+      "source_url": "https://www.battlefields.org/learn/primary-sources/gettysburg-address",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_52_1_0eb5e7f850ea": {
+      "book_title": "Page Not Found | American Battlefield Trust",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_52_1_0eb5e7f850ea",
+      "source_url": "https://www.battlefields.org/learn/primary-sources/house-divided-speech",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_53_1_7af303b7b344": {
+      "book_title": "The Project Gutenberg eBook of The Papers and Writings of Abraham Lincoln, Volumes 1-7, Complete",
+      "author_name": "SECRETARY STANTON",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_53_1_7af303b7b344",
+      "source_url": "https://www.gutenberg.org/files/3253/3253-h/3253-h.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_54_1_b6dd866ca23b": {
+      "book_title": "404 | Project Gutenberg",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_54_1_b6dd866ca23b",
+      "source_url": "https://www.gutenberg.org/files/3253/3253.txt",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_55_1_b71f1a1830eb": {
+      "book_title": "404 Page Not Found | The American Presidency Project",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_55_1_b71f1a1830eb",
+      "source_url": "https://www.presidency.ucsb.edu/documents/gettysburg-address",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_56_1_1d55c2a43f5b": {
+      "book_title": "404 Page Not Found | The American Presidency Project",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_56_1_1d55c2a43f5b",
+      "source_url": "https://www.presidency.ucsb.edu/documents/first-inaugural-address-3",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_57_1_6cddb47e8d2a": {
+      "book_title": "404 Page Not Found | The American Presidency Project",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_57_1_6cddb47e8d2a",
+      "source_url": "https://www.presidency.ucsb.edu/documents/second-inaugural-address-2",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_58_1_c287c32717d6": {
+      "book_title": "Page not found – The White House",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_58_1_c287c32717d6",
+      "source_url": "https://www.whitehouse.gov/about-the-white-house/presidents/abraham-lincoln/",
+      "scan_source": "Wikipedia JSON Dump"
+    },
+    "json_lincoln_8_1_11025bcd6fdf": {
+      "book_title": "Abraham Lincoln's Emancipation Proclamation ",
+      "author_name": "Unknown",
+      "publish_year": null,
+      "publisher": "Unknown",
+      "identifier": "json_lincoln_8_1_11025bcd6fdf",
+      "source_url": "https://www.abrahamlincolnonline.org/lincoln/speeches/emancipate.htm",
+      "scan_source": "Wikipedia JSON Dump"
+    }
+  },
+  "note": "Universal ingest: txt/xml/html/json/jsonl. Strict cleaned text (no html, no special symbols, single spaces). XML TEI split by pageinfo/pb."
+}

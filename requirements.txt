@@ -1,0 +1,11 @@
+numpy
+pandas 
+torch 
+torchvision 
+torchaudio
+faiss-cpu
+sentence-transformers
+requests
+streamlit 
+faiss-cpu
+huggingface_hub
