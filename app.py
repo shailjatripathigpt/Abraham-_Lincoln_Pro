@@ -8,18 +8,18 @@ from typing import Dict, Any, Iterable, List, Optional
 import numpy as np
 import requests
 import streamlit as st
-import gdown  # ✅ NEW
+import gdown
 
 try:
     import faiss
 except ImportError:
-    st.error("faiss not installed. Run: pip install faiss-cpu")
+    st.error("faiss not installed")
     raise
 
 try:
     from sentence_transformers import SentenceTransformer
 except ImportError:
-    st.error("sentence-transformers not installed.")
+    st.error("sentence-transformers not installed")
     raise
 
 
@@ -31,24 +31,19 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_TIMEOUT_S = 600
-OLLAMA_NUM_CTX = 2048
-OLLAMA_NUM_PREDICT = 160
 
 TOP_K = 15
 FINAL_K = 5
 PER_CHUNK_CHARS = 900
-CHAT_HEIGHT_PX = 420
 
-# ✅ GOOGLE DRIVE IDs
+# ✅ GOOGLE DRIVE FILE IDS
 FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
 META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
+CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
 SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
-
-RULES (must follow):
-1) Use ONLY the provided CONTEXT.
-2) Answer in 1–3 sentences.
-3) If not present, reply:
+Use ONLY the provided context.
+If not found say:
 Not found in provided documents.
 """
 
@@ -56,19 +51,19 @@ Not found in provided documents.
 # =========================
 # GOOGLE DRIVE DOWNLOAD
 # =========================
-def download_from_drive(file_id: str, dest_path: Path, label: str):
-    if dest_path.exists():
+def download_from_drive(file_id: str, dest: Path, label: str):
+    if dest.exists():
         return
 
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
 
     url = f"https://drive.google.com/uc?id={file_id}"
-    print(f"Downloading {label} from Google Drive...")
+    print(f"Downloading {label}...")
 
-    gdown.download(url, str(dest_path), quiet=False)
+    gdown.download(url, str(dest), quiet=False)
 
-    if not dest_path.exists():
-        raise FileNotFoundError(f"{label} download failed!")
+    if not dest.exists():
+        raise FileNotFoundError(f"{label} failed to download")
 
     print(f"{label} ready!")
 
@@ -86,12 +81,8 @@ def find_project_root(start: Path) -> Path:
 
 
 # =========================
-# JSONL HELPERS
+# JSONL LOADER
 # =========================
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def iter_jsonl(path: Path):
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -103,21 +94,19 @@ def iter_jsonl(path: Path):
 # LOAD RESOURCES
 # =========================
 @st.cache_resource(show_spinner=True)
-def load_rag_resources(project_root: Path):
+def load_resources(root: Path):
 
-    emb_dir = project_root / "embeddings"
-    chunks_dir = project_root / "chunks"
+    emb = root / "embeddings"
+    ch = root / "chunks"
 
-    index_path = emb_dir / "chunks.faiss"
-    meta_path = emb_dir / "chunks_meta.jsonl"
-    chunks_path = chunks_dir / "all_chunks.jsonl"
+    index_path = emb / "chunks.faiss"
+    meta_path = emb / "chunks_meta.jsonl"
+    chunks_path = ch / "all_chunks.jsonl"
 
-    # ✅ Auto-download from Drive
+    # ✅ Auto download
     download_from_drive(FAISS_FILE_ID, index_path, "FAISS index")
     download_from_drive(META_FILE_ID, meta_path, "Metadata")
-
-    if not chunks_path.exists():
-        raise FileNotFoundError(f"Missing {chunks_path}")
+    download_from_drive(CHUNKS_FILE_ID, chunks_path, "Chunks")
 
     index = faiss.read_index(str(index_path))
     meta_rows = list(iter_jsonl(meta_path))
@@ -136,39 +125,28 @@ def retrieve(index, meta_rows, chunk_text, emb_model, q):
     q_emb = emb_model.encode([q], convert_to_numpy=True).astype("float32")
     D, I = index.search(q_emb, FINAL_K)
 
-    results = []
+    out = []
     for score, idx in zip(D[0], I[0]):
         if idx < len(meta_rows):
             m = meta_rows[idx]
             cid = m["chunk_id"]
-            results.append({
+            out.append({
                 "score": float(score),
                 "text": chunk_text.get(cid, "")
             })
-    return results
+    return out
 
 
 # =========================
-# OLLAMA CALL
+# OLLAMA
 # =========================
-def ollama_generate(prompt: str) -> str:
-    url = f"{OLLAMA_URL}/api/generate"
+def ollama(prompt: str):
     r = requests.post(
-        url,
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.0,
-                "num_ctx": OLLAMA_NUM_CTX,
-                "num_predict": OLLAMA_NUM_PREDICT,
-            },
-        },
+        f"{OLLAMA_URL}/api/generate",
+        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
         timeout=OLLAMA_TIMEOUT_S,
     )
-    r.raise_for_status()
-    return r.json()["response"].strip()
+    return r.json()["response"]
 
 
 # =========================
@@ -179,29 +157,27 @@ def main():
     st.set_page_config(page_title="Lincoln Chatbot", layout="wide")
     st.title("🇺🇸 Abraham Lincoln Chatbot")
 
-    project_root = find_project_root(Path(__file__).parent)
+    root = find_project_root(Path(__file__).parent)
 
     try:
-        index, meta_rows, chunk_text, emb_model = load_rag_resources(project_root)
+        index, meta_rows, chunk_text, emb_model = load_resources(root)
     except Exception as e:
         st.error(str(e))
         st.stop()
 
-    if "chat" not in st.session_state:
-        st.session_state.chat = []
-
-    question = st.text_input("Ask about Abraham Lincoln...")
+    question = st.text_input("Ask something about Lincoln")
 
     if st.button("Send") and question:
 
         results = retrieve(index, meta_rows, chunk_text, emb_model, question)
 
         if not results:
-            answer = "Not found in provided documents."
-        else:
-            context = "\n".join(r["text"] for r in results)
+            st.write("Not found in provided documents.")
+            return
 
-            prompt = f"""{SYSTEM_PROMPT}
+        context = "\n".join(r["text"] for r in results)
+
+        prompt = f"""{SYSTEM_PROMPT}
 
 CONTEXT:
 {context}
@@ -211,10 +187,8 @@ QUESTION:
 
 ANSWER:
 """
-            try:
-                answer = ollama_generate(prompt)
-            except Exception as e:
-                answer = f"Ollama error: {e}"
+
+        answer = ollama(prompt)
 
         st.write("### Answer")
         st.write(answer)
@@ -222,3 +196,4 @@ ANSWER:
 
 if __name__ == "__main__":
     main()
+
