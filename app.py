@@ -215,7 +215,7 @@ CRITICAL RULES:
 
 QUESTION: {question}
 
-Answer as Abraham Lincoln using ONLY the context above. If unsure, say "Not found in provided documents.""""
+Answer as Abraham Lincoln using ONLY the context above. If unsure, say "Not found in provided documents."""
 
     messages = [
         {"role": "system", "content": system_prompt},
