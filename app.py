@@ -12,7 +12,8 @@ UI extras (NO change to RAG retrieval):
 
 UPDATED:
 ✅ Downloads embeddings/chunks from Google Drive using gdown + your file IDs
-✅ Groq ONLY (no Ollama calls at all) -> fixes Streamlit Cloud 127.0.0.1 error
+✅ Groq ONLY (no Ollama calls)
+✅ Fix for Groq 400: safer model + payload + error details + context length guard
 """
 
 import json
@@ -60,14 +61,19 @@ CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 
 # ✅ Groq settings
-# Streamlit secrets MUST contain:
+# Streamlit secrets:
 # GROQ_API_KEY = "...."
-GROQ_MODEL = "llama-3.1-70b-versatile"
+# GROQ_MODEL  = "llama-3.1-8b-instant"  (recommended)
+DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
 GROQ_TIMEOUT_S = 60
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
 TOP_K = 15
 FINAL_K = 5
+
+# Keep your original chunk size, but add a safety clamp before Groq call
 PER_CHUNK_CHARS = 900
+MAX_CONTEXT_CHARS_FOR_GROQ = 12000  # guard to avoid 400 due to context length
 
 PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
 CHAT_HEIGHT_PX = 420
@@ -249,27 +255,48 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
     return "\n".join(parts)
 
 
+def clamp_context_for_groq(context: str) -> str:
+    context = (context or "").strip()
+    if len(context) <= MAX_CONTEXT_CHARS_FOR_GROQ:
+        return context
+    # keep the beginning which contains top-ranked sources
+    return context[:MAX_CONTEXT_CHARS_FOR_GROQ].rstrip() + "\n...[TRUNCATED_FOR_GROQ]"
+
+
 # =========================
 # GROQ
 # =========================
 def _get_groq_key() -> str:
-    # strict secrets read (Streamlit Cloud)
     try:
         k = st.secrets["GROQ_API_KEY"]
         if isinstance(k, str) and k.strip():
             return k.strip()
     except Exception:
         pass
-    # local fallback
     return (os.getenv("GROQ_API_KEY") or "").strip()
+
+
+def _get_groq_model() -> str:
+    try:
+        m = st.secrets.get("GROQ_MODEL")
+        if isinstance(m, str) and m.strip():
+            return m.strip()
+    except Exception:
+        pass
+    env_m = (os.getenv("GROQ_MODEL") or "").strip()
+    return env_m if env_m else DEFAULT_GROQ_MODEL
 
 
 def groq_answer(system_prompt: str, context: str, question: str) -> str:
     api_key = _get_groq_key()
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY not found. Add it in Streamlit Secrets as: GROQ_API_KEY = \"...\"")
+        raise RuntimeError('GROQ_API_KEY not found. Add in Secrets: GROQ_API_KEY = "..."')
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    model = _get_groq_model()
+
+    # guard length to avoid 400
+    context = clamp_context_for_groq(context)
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     user_content = f"""
@@ -282,7 +309,7 @@ QUESTION:
 {question}
 
 RESPONSE REQUIREMENTS:
-- Output ONLY the final answer (no preface, no bullet labels).
+- Output ONLY the final answer (no preface).
 - 1–3 sentences maximum.
 - Do not mention sources, citations, chunk ids, or the word "context".
 - If the answer is not explicitly stated in CONTEXT, output exactly:
@@ -290,7 +317,7 @@ Not found in provided documents.
 """.strip()
 
     payload = {
-        "model": GROQ_MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
@@ -298,10 +325,19 @@ Not found in provided documents.
         "temperature": 0.0,
         "top_p": 0.7,
         "max_tokens": 220,
+        "stream": False,
     }
 
-    r = requests.post(url, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
-    r.raise_for_status()
+    r = requests.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
+
+    if r.status_code >= 400:
+        # Show the REAL Groq error body so you can fix instantly
+        try:
+            err = r.json()
+        except Exception:
+            err = {"raw": r.text}
+        raise RuntimeError(f"Groq error {r.status_code}: {err}")
+
     data = r.json()
     txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
 
@@ -327,7 +363,6 @@ Not found in provided documents.
 
 
 def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[str, str]:
-    # ✅ Groq ONLY (no Ollama fallback)
     ans = groq_answer(system_prompt, context, question)
     return ans, "groq"
 
@@ -633,6 +668,7 @@ def main():
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
         st.caption(f"Groq key loaded: {bool(_get_groq_key())}")
+        st.caption(f"Groq model: {_get_groq_model()}")
 
     with right:
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
@@ -707,11 +743,13 @@ def main():
             try:
                 answer, engine_used = generate_answer(SYSTEM_PROMPT, context, user_q)
             except Exception as e:
-                answer = f"Generation error: {type(e).__name__}: {str(e)[:300]}"
+                answer = f"Generation error: {type(e).__name__}: {str(e)[:450]}"
                 engine_used = "error"
                 conf = {"confidence": 0}
 
-        st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks, "engine": engine_used})
+        st.session_state.chat.append(
+            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks, "engine": engine_used}
+        )
 
         write_jsonl_line(
             history_path,
