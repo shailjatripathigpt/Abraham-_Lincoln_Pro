@@ -1,21 +1,30 @@
 # app.py
 """
-Streamlit UI for your RAG (FAISS + Groq API) with:
+Streamlit UI for your RAG (FAISS + Ollama phi3:mini) with:
 ✅ Ask question -> Top chunks -> Answer
 ✅ Confidence score
 ✅ Saves history to PROJECT_ROOT/rag_history/rag_history.jsonl
-✅ Google Drive integration for FAISS files
+
+UI extras added (NO change to RAG functionality):
+✅ Fixed-height scrollable chat box (TRUE fixed height using st.container(height=...))
+✅ Auto-scroll to latest answer (scrolls inside the chat box, not page)
+✅ Typing animation (visual only)
+
+ADDED (without changing RAG retrieval / UI flow):
+✅ Groq answering (better answers) + fallback to Ollama
+✅ Google Drive service account integration (optional) to upload rag_history.jsonl
 """
 
 import json
+import os
+import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any, Iterable, List, Optional
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 
 import numpy as np
 import requests
 import streamlit as st
-import gdown
 
 try:
     import faiss
@@ -29,21 +38,35 @@ except ImportError:
     st.error("sentence-transformers not installed. Run: pip install sentence-transformers")
     raise
 
+# --- Optional (Google Drive upload) ---
+# Install if you want Drive upload:
+# pip install google-api-python-client google-auth
+try:
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+
+    _GDRIVE_OK = True
+except Exception:
+    _GDRIVE_OK = False
+
 
 # =========================
 # CONSTANTS (NO UI SETTINGS)
 # =========================
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.1-8b-instant"  # Use this model - it's available for free
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_TIMEOUT_S = 30
-
+OLLAMA_MODEL = "phi3:mini"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+OLLAMA_URL = "http://127.0.0.1:11434"
+OLLAMA_TIMEOUT_S = 600
+OLLAMA_NUM_CTX = 2048
+OLLAMA_NUM_PREDICT = 160
 
-# Google Drive IDs
-FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
-META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
-CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
+# ✅ Groq settings (better answering)
+# Put key in Streamlit secrets or env:
+# - st.secrets["GROQ_API_KEY"] = "..."
+# or environment: GROQ_API_KEY=...
+GROQ_MODEL = "llama-3.1-70b-versatile"  # you can change anytime
+GROQ_TIMEOUT_S = 60
 
 TOP_K = 15
 FINAL_K = 5
@@ -54,37 +77,29 @@ PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
 # ✅ chat fixed height (keep same feel as your picture)
 CHAT_HEIGHT_PX = 420
 
+# ✅ Stronger grounding + better phrasing (still strict rules)
 SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
 
-RULES (must follow):
+HARD RULES (must follow):
 1) Use ONLY the provided CONTEXT. Do NOT use outside knowledge.
 2) Answer in 1–3 sentences maximum.
-3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids.
+3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids, do NOT mention "context says".
 4) If the answer is not explicitly present in CONTEXT, reply exactly:
    Not found in provided documents.
+
+ANSWER QUALITY:
+- Be direct and specific.
+- Prefer exact names/dates/places stated in CONTEXT.
+- If multiple facts are present, combine them into 1–3 clean sentences.
 """
 
-
-# =========================
-# DOWNLOAD FROM GOOGLE DRIVE
-# =========================
-def download_from_drive(file_id: str, destination: Path):
-    """Download file from Google Drive if it doesn't exist"""
-    if destination.exists():
-        return True
-    
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        gdown.download(
-            f"https://drive.google.com/uc?id={file_id}",
-            str(destination),
-            quiet=False
-        )
-        return destination.exists()
-    except Exception as e:
-        st.warning(f"Could not download {destination.name} from Google Drive: {str(e)}")
-        return False
+# ✅ Google Drive (optional): auto-upload history file after each answer
+# Put service account json in st.secrets (recommended) or env.
+# REQUIRED secrets (suggested):
+# st.secrets["GDRIVE_SERVICE_ACCOUNT_JSON"] = { ... full json ... }
+# st.secrets["GDRIVE_FOLDER_ID"] = "your_drive_folder_id"
+UPLOAD_HISTORY_TO_DRIVE = False  # set True if you want auto-upload
+GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 
 # =========================
@@ -213,65 +228,211 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
 
 
 # =========================
-# GROQ GENERATION - SIMPLE AND WORKING
+# OLLAMA
 # =========================
-def groq_generate(prompt: str) -> str:
-    """Generate response using Groq API"""
-    if not GROQ_API_KEY:
-        return "Error: Groq API key is missing"
-    
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+def ollama_generate(prompt: str) -> str:
+    url = f"{OLLAMA_URL.rstrip('/')}/api/generate"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.0,
+            "top_p": 0.7,
+            "num_ctx": int(OLLAMA_NUM_CTX),
+            "num_predict": int(OLLAMA_NUM_PREDICT),
+        },
     }
-    
+    r = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT_S)
+    r.raise_for_status()
+    return (r.json().get("response") or "").strip()
+
+
+# =========================
+# GROQ (OpenAI-compatible endpoint)
+# =========================
+def _get_groq_key() -> str:
+    k = ""
+    try:
+        k = (st.secrets.get("GROQ_API_KEY") or "").strip()
+    except Exception:
+        k = ""
+    if not k:
+        k = (os.getenv("GROQ_API_KEY") or "").strip()
+    return k
+
+
+def groq_answer(system_prompt: str, context: str, question: str) -> str:
+    """
+    Uses Groq chat completions (OpenAI-compatible).
+    Improves answer quality while enforcing your strict rules.
+    """
+    api_key = _get_groq_key()
+    if not api_key:
+        raise RuntimeError("Missing GROQ_API_KEY")
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    user_content = f"""
+You will answer the QUESTION using ONLY the CONTEXT.
+
+CONTEXT:
+{context}
+
+QUESTION:
+{question}
+
+RESPONSE REQUIREMENTS:
+- Output ONLY the final answer (no preface, no bullet labels).
+- 1–3 sentences maximum.
+- Do not mention sources, citations, chunk ids, or the word "context".
+- If the answer is not explicitly stated in CONTEXT, output exactly:
+Not found in provided documents.
+""".strip()
+
     payload = {
         "model": GROQ_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
         ],
-        "temperature": 0.1,
-        "max_tokens": 300,
-        "top_p": 0.9,
-        "stream": False
+        "temperature": 0.0,
+        "top_p": 0.7,
+        "max_tokens": 220,
     }
-    
+
+    r = requests.post(url, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
+    r.raise_for_status()
+    data = r.json()
+    txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+
+    # Light output guardrails (generator-only; retrieval unchanged)
+    bad_markers = ["CITATIONS", "SOURCE", "Chunk", "chunk_id", "context", "Context"]
+    for bm in bad_markers:
+        if bm in txt:
+            txt = txt.replace(bm, "").strip()
+
+    if not txt or len(txt) < 3:
+        return "Not found in provided documents."
+
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", txt) if s.strip()]
+    if len(sents) > 3:
+        txt = " ".join(sents[:3]).strip()
+
+    txt = txt.replace("ANSWER:", "").replace("Final answer:", "").strip()
+
+    if any(k in txt.lower() for k in ["source 1", "source 2", "chunk id", "chunk_id", "citations"]):
+        return "Not found in provided documents."
+
+    return txt
+
+
+def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[str, str]:
+    """
+    Returns (answer, engine_used)
+    Priority: Groq -> fallback to Ollama
+    """
     try:
-        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
-        
-        if response.status_code != 200:
-            # Try to get error details
+        ans = groq_answer(system_prompt, context, question)
+        return ans, "groq"
+    except Exception:
+        prompt = f"""{system_prompt}
+
+CONTEXT:
+{context}
+
+QUESTION:
+{question}
+
+ANSWER:
+"""
+        ans = ollama_generate(prompt)
+        return ans, "ollama"
+
+
+# =========================
+# GOOGLE DRIVE (optional upload)
+# =========================
+def _get_drive_folder_id() -> str:
+    fid = ""
+    try:
+        fid = (st.secrets.get("GDRIVE_FOLDER_ID") or "").strip()
+    except Exception:
+        fid = ""
+    if not fid:
+        fid = (os.getenv("GDRIVE_FOLDER_ID") or "").strip()
+    return fid
+
+
+def _get_drive_service():
+    """
+    Loads service account credentials from:
+    - st.secrets["GDRIVE_SERVICE_ACCOUNT_JSON"] (dict or json string), OR
+    - env var GDRIVE_SERVICE_ACCOUNT_JSON (json string), OR
+    - env var GOOGLE_APPLICATION_CREDENTIALS (path to json file)
+    """
+    if not _GDRIVE_OK:
+        raise RuntimeError("Google Drive libs not installed. Install google-api-python-client google-auth")
+
+    sa_info = None
+
+    # 1) Streamlit secrets (best)
+    try:
+        sa_info = st.secrets.get("GDRIVE_SERVICE_ACCOUNT_JSON")
+    except Exception:
+        sa_info = None
+
+    # 2) Env json
+    if sa_info is None:
+        env_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
+        if env_json:
             try:
-                error_data = response.json()
-                error_msg = error_data.get("error", {}).get("message", response.text[:200])
-            except:
-                error_msg = response.text[:200]
-            
-            st.error(f"Groq API Error {response.status_code}: {error_msg}")
-            return f"API Error: {response.status_code}"
-        
-        result = response.json()
-        
-        if "choices" in result and len(result["choices"]) > 0:
-            answer = result["choices"][0]["message"]["content"].strip()
-            
-            # Clean up the answer
-            if answer.startswith("Answer:"):
-                answer = answer[7:].strip()
-            elif answer.startswith("ANSWER:"):
-                answer = answer[7:].strip()
-                
-            return answer
-        else:
-            return "Not found in provided documents."
-            
-    except requests.exceptions.ConnectionError:
-        return "Connection error: Cannot connect to Groq API"
-    except requests.exceptions.Timeout:
-        return "Timeout error: Groq API took too long to respond"
-    except Exception as e:
-        return f"Error: {str(e)[:200]}"
+                sa_info = json.loads(env_json)
+            except Exception:
+                sa_info = None
+
+    # 3) GOOGLE_APPLICATION_CREDENTIALS path
+    if sa_info is None:
+        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_path and Path(cred_path).exists():
+            sa_info = json.loads(Path(cred_path).read_text(encoding="utf-8"))
+
+    if sa_info is None:
+        raise RuntimeError("Missing Google Drive service account JSON in secrets/env")
+
+    if isinstance(sa_info, str):
+        sa_info = json.loads(sa_info)
+
+    creds = Credentials.from_service_account_info(sa_info, scopes=GDRIVE_SCOPES)
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    return service
+
+
+def upload_history_to_drive(history_file: Path) -> None:
+    """
+    Uploads (or overwrites) rag_history.jsonl into a Drive folder.
+    Best-effort; does not affect RAG/UI flow.
+    """
+    folder_id = _get_drive_folder_id()
+    if not folder_id:
+        raise RuntimeError("Missing GDRIVE_FOLDER_ID")
+
+    service = _get_drive_service()
+
+    filename = history_file.name
+    q = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
+    res = service.files().list(q=q, fields="files(id,name)", pageSize=10).execute()
+    files = res.get("files") or []
+
+    media = MediaFileUpload(str(history_file), mimetype="application/json", resumable=True)
+
+    if files:
+        file_id = files[0]["id"]
+        service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        meta = {"name": filename, "parents": [folder_id]}
+        service.files().create(body=meta, media_body=media, fields="id").execute()
 
 
 # =========================
@@ -285,19 +446,6 @@ def load_rag_resources(project_root: Path):
     index_path = emb_dir / "chunks.faiss"
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
-
-    # Download files from Google Drive if needed
-    with st.spinner("Checking for FAISS index..."):
-        if not index_path.exists():
-            download_from_drive(FAISS_FILE_ID, index_path)
-    
-    with st.spinner("Checking for metadata..."):
-        if not meta_path.exists():
-            download_from_drive(META_FILE_ID, meta_path)
-    
-    with st.spinner("Checking for chunks data..."):
-        if not chunks_path.exists():
-            download_from_drive(CHUNKS_FILE_ID, chunks_path)
 
     if not index_path.exists():
         raise FileNotFoundError(f"FAISS index not found: {index_path}")
@@ -359,7 +507,7 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
 
 
 # =========================
-# UI (EXACTLY THE SAME AS YOUR ORIGINAL)
+# UI
 # =========================
 def inject_css():
     st.markdown(
@@ -511,7 +659,7 @@ def inject_css():
 
 
 def render_topbar():
-    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT</div>', unsafe_allow_html=True)
 
 
 def show_portrait():
@@ -561,7 +709,6 @@ def render_typing_indicator():
 
 
 def autoscroll_inside_chat():
-    # This scrolls INSIDE the fixed-height st.container() (not the whole page)
     st.markdown(
         """
         <script>
@@ -580,12 +727,6 @@ def main():
     st.set_page_config(page_title="The Abraham Lincoln Chatbot", layout="wide")
     inject_css()
     render_topbar()
-
-    # Check for Groq API key
-    if not GROQ_API_KEY:
-        st.error("❌ Groq API key is missing! Please add it to your Streamlit secrets.toml file.")
-        st.info("Add this to your `.streamlit/secrets.toml` file:\n\nGROQ_API_KEY = \"your-groq-api-key-here\"")
-        st.stop()
 
     script_dir = Path(__file__).resolve().parent
     project_root = find_project_root(script_dir)
@@ -613,14 +754,11 @@ def main():
         show_portrait()
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
-        st.markdown("---")
-        st.markdown("**Powered by:**")
-        st.markdown("• Groq API (Llama 3.1)")
-        st.markdown("• Google Drive Storage")
-        st.markdown("• FAISS Vector Search")
+
+        groq_present = bool(_get_groq_key())
+        st.caption(f"Answering engine: {'Groq (primary)' if groq_present else 'Ollama (fallback)'}")
 
     with right:
-        # ✅ TRUE fixed-height scroll container (this prevents the box from growing)
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
 
         with chat_area:
@@ -636,10 +774,8 @@ def main():
             if st.session_state.is_typing:
                 render_typing_indicator()
 
-            # anchor must be INSIDE the scroll container
             st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
 
-        # auto-scroll after chat renders
         autoscroll_inside_chat()
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -672,7 +808,7 @@ def main():
             st.session_state.is_typing = True
             st.rerun()
 
-    # Generation step (using Groq API)
+    # Generation step (same RAG functionality)
     if st.session_state.is_typing:
         user_q = (st.session_state.pending_user_q or "").strip()
         if not user_q:
@@ -696,33 +832,22 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        # Build the prompt - EXACT SAME as phi3:mini
-        prompt = f"""{SYSTEM_PROMPT}
-
-CONTEXT:
-{context}
-
-QUESTION:
-{user_q}
-
-ANSWER:
-"""
-
-        with st.spinner("Generating answer with Groq..."):
+        with st.spinner("Generating answer (Groq preferred, Ollama fallback)..."):
             try:
-                answer = groq_generate(prompt)
-                # Debug: Show prompt in expander
-                with st.expander("Debug: See what was sent to Groq"):
-                    st.write("**Prompt:**")
-                    st.text(prompt[:1000] + "..." if len(prompt) > 1000 else prompt)
-                    st.write("**Answer:**")
-                    st.text(answer)
+                answer, engine_used = generate_answer(SYSTEM_PROMPT, context, user_q)
             except Exception as e:
-                answer = f"Error generating answer: {type(e).__name__}: {str(e)[:300]}"
+                answer = f"Generation error: {type(e).__name__}: {str(e)[:300]}"
+                engine_used = "error"
                 conf = {"confidence": 0}
 
         st.session_state.chat.append(
-            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks}
+            {
+                "role": "assistant",
+                "text": answer,
+                "confidence": conf.get("confidence", 0),
+                "sources": top_chunks,
+                "engine": engine_used,
+            }
         )
 
         write_jsonl_line(
@@ -731,6 +856,7 @@ ANSWER:
                 "ts": utc_now_iso(),
                 "question": user_q,
                 "answer": answer,
+                "engine": engine_used,
                 "confidence": conf.get("confidence", 0),
                 "confidence_details": conf,
                 "sources": [
@@ -751,6 +877,13 @@ ANSWER:
             },
         )
 
+        # Optional: upload history to Drive (best-effort; no UI/flow change)
+        if UPLOAD_HISTORY_TO_DRIVE:
+            try:
+                upload_history_to_drive(history_path)
+            except Exception:
+                pass
+
         st.session_state.is_typing = False
         st.session_state.pending_user_q = ""
         st.rerun()
@@ -765,9 +898,7 @@ ANSWER:
     if last and last.get("sources"):
         st.markdown("### 📌 Sources (real)")
         for i, c in enumerate(last["sources"], start=1):
-            with st.expander(
-                f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"
-            ):
+            with st.expander(f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"):
                 st.write(f"**Title:** {c.get('title')}")
                 st.write(f"**Author:** {c.get('author')}")
                 st.write(f"**Year:** {c.get('publish_year')}")
