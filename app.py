@@ -1,18 +1,18 @@
 # app.py
 """
-Streamlit UI for your RAG (FAISS + Groq on Streamlit Cloud / Ollama locally) with:
+Streamlit UI for your RAG (FAISS + Groq) with:
 ✅ Ask question -> Top chunks -> Answer
 ✅ Confidence score
 ✅ Saves history to PROJECT_ROOT/rag_history/rag_history.jsonl
 
-UI extras added (NO change to RAG functionality):
+UI extras (NO change to RAG retrieval):
 ✅ Fixed-height scrollable chat box (TRUE fixed height using st.container(height=...))
-✅ Auto-scroll to latest answer (scrolls inside the chat box, not page)
+✅ Auto-scroll to latest answer (scrolls inside chat box)
 ✅ Typing animation (visual only)
 
 UPDATED:
-✅ Downloads embeddings/chunks from Google Drive using gdown + your file IDs (for Streamlit Cloud)
-✅ Groq: reads GROQ_API_KEY from Streamlit secrets; Cloud uses Groq ONLY (no Ollama calls)
+✅ Downloads embeddings/chunks from Google Drive using gdown + your file IDs
+✅ Groq ONLY (no Ollama calls at all) -> fixes Streamlit Cloud 127.0.0.1 error
 """
 
 import json
@@ -26,7 +26,7 @@ import numpy as np
 import requests
 import streamlit as st
 
-# ✅ gdown for Google Drive direct file download
+# ✅ gdown for Google Drive download
 try:
     import gdown
 except ImportError:
@@ -55,17 +55,12 @@ CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
 
 # =========================
-# CONSTANTS (NO UI SETTINGS)
+# CONSTANTS
 # =========================
-OLLAMA_MODEL = "phi3:mini"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-OLLAMA_URL = "http://127.0.0.1:11434"
-OLLAMA_TIMEOUT_S = 600
-OLLAMA_NUM_CTX = 2048
-OLLAMA_NUM_PREDICT = 160
 
 # ✅ Groq settings
-# Streamlit secrets:
+# Streamlit secrets MUST contain:
 # GROQ_API_KEY = "...."
 GROQ_MODEL = "llama-3.1-70b-versatile"
 GROQ_TIMEOUT_S = 60
@@ -75,7 +70,6 @@ FINAL_K = 5
 PER_CHUNK_CHARS = 900
 
 PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
-
 CHAT_HEIGHT_PX = 420
 
 SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
@@ -92,13 +86,6 @@ ANSWER QUALITY:
 - Prefer exact names/dates/places stated in CONTEXT.
 - If multiple facts are present, combine them into 1–3 clean sentences.
 """
-
-
-# =========================
-# ENV HELPERS
-# =========================
-def is_streamlit_cloud() -> bool:
-    return bool(os.getenv("STREAMLIT_RUNTIME_ENV")) or bool(os.getenv("STREAMLIT_CLOUD"))
 
 
 # =========================
@@ -154,7 +141,7 @@ def write_jsonl_line(path: Path, obj: Dict[str, Any]) -> None:
 
 
 # =========================
-# DOWNLOAD FROM GOOGLE DRIVE (YOUR FUNCTION)
+# DOWNLOAD FROM GOOGLE DRIVE
 # =========================
 def download_from_drive(file_id: str, destination: Path):
     if destination.exists():
@@ -169,11 +156,6 @@ def download_from_drive(file_id: str, destination: Path):
 
 
 def ensure_rag_files_present(project_root: Path) -> None:
-    """
-    Ensures required files exist locally.
-    On Streamlit Cloud, downloads them from Google Drive (gdown).
-    Locally, it won't download if already present.
-    """
     emb_dir = project_root / "embeddings"
     chunks_dir = project_root / "chunks"
 
@@ -181,22 +163,17 @@ def ensure_rag_files_present(project_root: Path) -> None:
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
 
-    missing = [p for p in [index_path, meta_path, chunks_path] if not p.exists()]
-    if not missing:
+    if index_path.exists() and meta_path.exists() and chunks_path.exists():
         return
 
-    # Always try download if missing (safe for local too)
     with st.spinner("Downloading RAG files from Google Drive..."):
         ok1 = download_from_drive(FAISS_FILE_ID, index_path)
         ok2 = download_from_drive(META_FILE_ID, meta_path)
         ok3 = download_from_drive(CHUNKS_FILE_ID, chunks_path)
 
     if not (ok1 and ok2 and ok3):
-        # show which still missing
         still = [str(p) for p in [index_path, meta_path, chunks_path] if not p.exists()]
-        raise FileNotFoundError(
-            "Some RAG files are missing even after Google Drive download:\n" + "\n".join(still)
-        )
+        raise FileNotFoundError("Missing RAG files after Google Drive download:\n" + "\n".join(still))
 
 
 # =========================
@@ -273,46 +250,24 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
 
 
 # =========================
-# OLLAMA
-# =========================
-def ollama_generate(prompt: str) -> str:
-    if is_streamlit_cloud():
-        raise RuntimeError("Ollama is not available on Streamlit Cloud. Use Groq.")
-
-    url = f"{OLLAMA_URL.rstrip('/')}/api/generate"
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.0,
-            "top_p": 0.7,
-            "num_ctx": int(OLLAMA_NUM_CTX),
-            "num_predict": int(OLLAMA_NUM_PREDICT),
-        },
-    }
-    r = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT_S)
-    r.raise_for_status()
-    return (r.json().get("response") or "").strip()
-
-
-# =========================
 # GROQ
 # =========================
 def _get_groq_key() -> str:
+    # strict secrets read (Streamlit Cloud)
     try:
         k = st.secrets["GROQ_API_KEY"]
         if isinstance(k, str) and k.strip():
             return k.strip()
     except Exception:
         pass
+    # local fallback
     return (os.getenv("GROQ_API_KEY") or "").strip()
 
 
 def groq_answer(system_prompt: str, context: str, question: str) -> str:
     api_key = _get_groq_key()
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY not found. Add it to Streamlit secrets.")
+        raise RuntimeError("GROQ_API_KEY not found. Add it in Streamlit Secrets as: GROQ_API_KEY = \"...\"")
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -350,7 +305,7 @@ Not found in provided documents.
     data = r.json()
     txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
 
-    # Light output guardrails
+    # Output guardrails
     bad_markers = ["CITATIONS", "SOURCE", "Chunk", "chunk_id", "context", "Context"]
     for bm in bad_markers:
         if bm in txt:
@@ -372,32 +327,9 @@ Not found in provided documents.
 
 
 def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[str, str]:
-    # Streamlit Cloud: Groq ONLY
-    if is_streamlit_cloud():
-        ans = groq_answer(system_prompt, context, question)
-        return ans, "groq"
-
-    # Local: Groq preferred, Ollama fallback
-    api_key = _get_groq_key()
-    if api_key:
-        try:
-            ans = groq_answer(system_prompt, context, question)
-            return ans, "groq"
-        except Exception:
-            pass
-
-    prompt = f"""{system_prompt}
-
-CONTEXT:
-{context}
-
-QUESTION:
-{question}
-
-ANSWER:
-"""
-    ans = ollama_generate(prompt)
-    return ans, "ollama"
+    # ✅ Groq ONLY (no Ollama fallback)
+    ans = groq_answer(system_prompt, context, question)
+    return ans, "groq"
 
 
 # =========================
@@ -405,7 +337,6 @@ ANSWER:
 # =========================
 @st.cache_resource(show_spinner=True)
 def load_rag_resources(project_root: Path):
-    # ✅ ensure files exist (download from drive if missing)
     ensure_rag_files_present(project_root)
 
     emb_dir = project_root / "embeddings"
@@ -494,7 +425,6 @@ def inject_css():
             font-size: 26px;
           }
 
-          /* Style ONLY the first main two-column block */
           div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stVerticalBlock"]{
             background: rgba(80,55,30,0.35);
             border: 1px solid rgba(0,0,0,0.35);
@@ -524,7 +454,6 @@ def inject_css():
             margin-bottom: 6px;
           }
 
-          /* Chat bubbles (text black) */
           .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
           .bubble { color:#000 !important; }
 
@@ -551,7 +480,6 @@ def inject_css():
           .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
           .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
 
-          /* Send button */
           .stButton > button {
             background: #0f172a;
             color: #ffffff;
@@ -560,9 +488,7 @@ def inject_css():
             padding: 10px 16px;
             font-weight: 800;
           }
-          .stButton > button:hover { background: #111c35; color: #fff; }
 
-          /* Remove extra boxes around input */
           div[data-testid="stForm"], div[data-testid="stForm"] > div {
             background: transparent !important;
             border: none !important;
@@ -570,13 +496,7 @@ def inject_css():
             margin: 0 !important;
             box-shadow: none !important;
           }
-          div[data-testid="stHorizontalBlock"] div[data-testid="column"] {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-          }
 
-          /* Input style (single box) */
           div[data-testid="stTextInput"] input {
             width: 100% !important;
             background: rgba(255,255,255,0.65) !important;
@@ -586,9 +506,7 @@ def inject_css():
             color: rgba(0,0,0,0.75) !important;
             box-shadow: none !important;
           }
-          div[data-testid="stTextInput"] input::placeholder { color: rgba(0,0,0,0.45) !important; }
 
-          /* Typing animation dots */
           .typing {
             display: inline-flex;
             gap: 6px;
@@ -714,14 +632,7 @@ def main():
         show_portrait()
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
-
-        st.caption(f"Runtime: {'Streamlit Cloud' if is_streamlit_cloud() else 'Local'}")
         st.caption(f"Groq key loaded: {bool(_get_groq_key())}")
-
-        # Optional visibility for downloaded paths
-        # st.caption(f"Index: {resources['paths']['index']}")
-        # st.caption(f"Meta : {resources['paths']['meta']}")
-        # st.caption(f"Chunks: {resources['paths']['chunks']}")
 
     with right:
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
@@ -742,7 +653,6 @@ def main():
             st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
 
         autoscroll_inside_chat()
-
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
         st.session_state.show_context = st.checkbox(
@@ -773,7 +683,6 @@ def main():
             st.session_state.is_typing = True
             st.rerun()
 
-    # Generation step (same RAG functionality)
     if st.session_state.is_typing:
         user_q = (st.session_state.pending_user_q or "").strip()
         if not user_q:
@@ -786,10 +695,7 @@ def main():
         if not top_chunks:
             answer = "Not found in provided documents."
             st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": 0, "sources": []})
-            write_jsonl_line(
-                history_path,
-                {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []},
-            )
+            write_jsonl_line(history_path, {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []})
             st.session_state.is_typing = False
             st.session_state.pending_user_q = ""
             st.rerun()
@@ -797,7 +703,7 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        with st.spinner("Generating answer (Groq on Cloud, Groq/Ollama locally)..."):
+        with st.spinner("Generating answer with Groq..."):
             try:
                 answer, engine_used = generate_answer(SYSTEM_PROMPT, context, user_q)
             except Exception as e:
@@ -805,9 +711,7 @@ def main():
                 engine_used = "error"
                 conf = {"confidence": 0}
 
-        st.session_state.chat.append(
-            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks, "engine": engine_used}
-        )
+        st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks, "engine": engine_used})
 
         write_jsonl_line(
             history_path,
@@ -840,7 +744,6 @@ def main():
         st.session_state.pending_user_q = ""
         st.rerun()
 
-    # SOURCES (unchanged)
     last = None
     for m in reversed(st.session_state.chat):
         if m.get("role") == "assistant" and m.get("sources"):
