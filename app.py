@@ -16,6 +16,9 @@ ADDED (without changing your UI / flow):
 ✅ Phi3:mini kept as LOCAL fallback when Groq not available
 ✅ Better retrieval: de-dup + diversity selection (MMR-lite) to improve answer quality
 ✅ Better chunk truncation: more factual sentence-first
+
+FIXED:
+✅ If answer == "Not found in provided documents." then confidence forced to 0
 """
 
 import json
@@ -66,16 +69,16 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_TIMEOUT_S = 600
 OLLAMA_NUM_CTX = 2048
-OLLAMA_NUM_PREDICT = 180  # small bump, still close to your original
+OLLAMA_NUM_PREDICT = 180
 
 # Groq
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
 GROQ_TIMEOUT_S = 60
 
-TOP_K = 22           # slightly higher candidate pool improves retrieval
-FINAL_K = 6          # slightly more evidence helps answers (UI unchanged)
-PER_CHUNK_CHARS = 750  # slightly tighter = less OCR noise
+TOP_K = 22
+FINAL_K = 6
+PER_CHUNK_CHARS = 750
 
 PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
 CHAT_HEIGHT_PX = 420
@@ -146,6 +149,10 @@ def write_jsonl_line(path: Path, obj: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def is_not_found_answer(ans: str) -> bool:
+    return (ans or "").strip() == "Not found in provided documents."
 
 
 # =========================
@@ -257,10 +264,6 @@ def _dedup_candidates(cands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _mmr_select(candidates: List[Dict[str, Any]], k: int, lambda_mult: float = 0.78) -> List[Dict[str, Any]]:
-    """
-    Lightweight MMR-style selection to avoid duplicate pages/docs.
-    Uses soft penalties instead of expensive pairwise similarity.
-    """
     if not candidates:
         return []
 
@@ -451,7 +454,6 @@ QUESTION:
     data = r.json()
     txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
 
-    # Keep it clean
     txt = txt.replace("ANSWER:", "").replace("Final answer:", "").strip()
     sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", txt) if s.strip()]
     if len(sents) > 3:
@@ -462,14 +464,10 @@ QUESTION:
 
 
 def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[str, str]:
-    """
-    Keep phi3:mini working superb locally.
-    Prefer Groq when GROQ_API_KEY is present (Streamlit Cloud), else use phi3:mini.
-    """
+    # Prefer Groq when available (Streamlit Cloud). Else use phi3:mini locally.
     if _get_groq_key():
         return groq_generate(system_prompt, context, question), "groq"
 
-    # fallback to phi3:mini exactly like before
     prompt = f"""{system_prompt}
 
 CONTEXT:
@@ -488,7 +486,6 @@ ANSWER:
 # =========================
 @st.cache_resource(show_spinner=True)
 def load_rag_resources(project_root: Path):
-    # If files are missing, download from Drive (great for Streamlit Cloud)
     ensure_rag_files_present(project_root)
 
     emb_dir = project_root / "embeddings"
@@ -497,13 +494,6 @@ def load_rag_resources(project_root: Path):
     index_path = emb_dir / "chunks.faiss"
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
-
-    if not index_path.exists():
-        raise FileNotFoundError(f"FAISS index not found: {index_path}")
-    if not meta_path.exists():
-        raise FileNotFoundError(f"Meta JSONL not found: {meta_path}")
-    if not chunks_path.exists():
-        raise FileNotFoundError(f"Chunks JSONL not found: {chunks_path}")
 
     index = faiss.read_index(str(index_path))
     meta_rows = list(iter_jsonl(meta_path))
@@ -530,7 +520,7 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
 
     q_emb = emb_model.encode([question], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
 
-    fetch_k = max(TOP_K, FINAL_K * 4)  # fetch more, then diversify
+    fetch_k = max(TOP_K, FINAL_K * 4)
     D, I = index.search(q_emb, fetch_k)
 
     candidates: List[Dict[str, Any]] = []
@@ -560,11 +550,8 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
             }
         )
 
-    # de-dup + sort
     candidates = _dedup_candidates(candidates)
     candidates.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-
-    # diversify selection
     selected = _mmr_select(candidates, k=FINAL_K, lambda_mult=0.78)
 
     return selected, candidates
@@ -818,8 +805,6 @@ def main():
         show_portrait()
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
-
-        # tiny debug info (doesn't change UI)
         if _get_groq_key():
             st.caption(f"Generator: Groq ({_get_groq_model()})")
         else:
@@ -887,8 +872,9 @@ def main():
 
         if not top_chunks:
             answer = "Not found in provided documents."
-            st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": 0, "sources": []})
-            write_jsonl_line(history_path, {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []})
+            final_conf = 0
+            st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": final_conf, "sources": []})
+            write_jsonl_line(history_path, {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": final_conf, "sources": []})
             st.session_state.is_typing = False
             st.session_state.pending_user_q = ""
             st.rerun()
@@ -901,10 +887,16 @@ def main():
                 answer, engine = generate_answer(SYSTEM_PROMPT, context, user_q)
             except Exception as e:
                 answer = f"Generation error: {type(e).__name__}: {str(e)[:450]}"
+                engine = "error"
                 conf = {"confidence": 0}
 
+        # ✅ FIX: If answer is Not found, confidence must be 0
+        final_conf = int(conf.get("confidence", 0) or 0)
+        if is_not_found_answer(answer):
+            final_conf = 0
+
         st.session_state.chat.append(
-            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks}
+            {"role": "assistant", "text": answer, "confidence": final_conf, "sources": top_chunks}
         )
 
         write_jsonl_line(
@@ -913,8 +905,8 @@ def main():
                 "ts": utc_now_iso(),
                 "question": user_q,
                 "answer": answer,
-                "engine": engine if "engine" in locals() else None,
-                "confidence": conf.get("confidence", 0),
+                "engine": engine,
+                "confidence": final_conf,
                 "confidence_details": conf,
                 "sources": [
                     {
