@@ -6,16 +6,13 @@ Streamlit UI for your RAG (FAISS + Groq API) with:
 ✅ Saves history to PROJECT_ROOT/rag_history/rag_history.jsonl
 ✅ Google Drive integration for FAISS files
 
-UI extras added (NO change to RAG functionality):
-✅ Fixed-height scrollable chat box (TRUE fixed height using st.container(height=...))
-✅ Auto-scroll to latest answer (scrolls inside the chat box, not page)
-✅ Typing animation (visual only)
+IMPROVED: Better answer quality by prioritizing higher-confidence chunks
 """
 
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any, Iterable, List, Optional
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 
 import numpy as np
 import requests
@@ -59,17 +56,23 @@ PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
 # ✅ chat fixed height (keep same feel as your picture)
 CHAT_HEIGHT_PX = 420
 
-SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
+SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant. Your role is to provide accurate, concise answers based ONLY on the provided context.
 
-RULES (must follow):
-1) Use ONLY the provided CONTEXT. Do NOT use outside knowledge.
-2) Answer in 1–3 sentences maximum.
-3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids.
-4) If the answer is not explicitly present in CONTEXT, reply exactly:
-   Not found in provided documents.
-5) Make your answer clear, concise, and directly based on the context provided.
-6) If the context contains relevant information, synthesize it into a coherent answer.
-"""
+CRITICAL RULES (MUST FOLLOW):
+1. Use ONLY the provided CONTEXT. Do NOT use outside knowledge.
+2. Answer in 1-3 clear, concise sentences.
+3. NEVER mention "SOURCE", "CONTEXT", "CHUNK", "CITATION", or any reference numbers.
+4. If the answer is not explicitly present in CONTEXT, reply exactly: "Not found in provided documents."
+5. If there are conflicting facts in different parts of the context:
+   - Prioritize the information from the MOST RELEVANT/TRUSTWORTHY part of the context
+   - Look for CONSISTENCY across multiple context entries
+   - If one fact is supported by multiple context entries while another is only mentioned once, use the supported fact
+   - NEVER mention that there's conflicting information
+6. Your answer should be a SINGLE, COHERENT response that directly answers the question.
+7. Do NOT start your answer with phrases like "According to the context" or "Based on the provided information".
+8. Simply state the answer as if it's a known fact.
+
+GOAL: Provide the most accurate answer possible based on the available context."""
 
 
 # =========================
@@ -198,53 +201,138 @@ def compute_confidence(top_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =========================
-# CONTEXT BUILD
+# CONTEXT BUILDING - IMPROVED
 # =========================
 def truncate_text(s: str, max_chars: int) -> str:
     s = (s or "").strip()
     if len(s) <= max_chars:
         return s
-    return s[:max_chars].rstrip() + " ...[TRUNCATED]"
+    return s[:max_chars].rstrip() + " ..."
+
+
+def analyze_context_for_consistency(chunks: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Analyze context chunks for consistency and identify the most reliable information.
+    Returns filtered chunks and analysis metadata.
+    """
+    if not chunks:
+        return [], {}
+    
+    # Group by document/source
+    source_groups = {}
+    for chunk in chunks:
+        source = chunk.get('scan_source', 'unknown')
+        if source not in source_groups:
+            source_groups[source] = []
+        source_groups[source].append(chunk)
+    
+    # Calculate average score per source
+    source_avg_scores = {}
+    for source, source_chunks in source_groups.items():
+        avg_score = sum(c['score'] for c in source_chunks) / len(source_chunks)
+        source_avg_scores[source] = avg_score
+    
+    # Identify the most consistent source (highest average score with multiple chunks)
+    consistent_source = None
+    max_avg_score = 0
+    for source, avg_score in source_avg_scores.items():
+        if avg_score > max_avg_score and len(source_groups[source]) >= 2:
+            max_avg_score = avg_score
+            consistent_source = source
+    
+    # If we found a consistent source, prioritize those chunks
+    if consistent_source:
+        # Sort chunks: consistent source first, then by score
+        prioritized_chunks = []
+        for chunk in sorted(chunks, key=lambda x: x['score'], reverse=True):
+            if chunk.get('scan_source') == consistent_source:
+                prioritized_chunks.insert(0, chunk)
+            else:
+                prioritized_chunks.append(chunk)
+        
+        # Take top chunks (but ensure we include the consistent ones)
+        final_chunks = prioritized_chunks[:FINAL_K]
+        
+        analysis = {
+            'consistent_source_found': True,
+            'consistent_source': consistent_source,
+            'avg_score': max_avg_score,
+            'total_sources': len(source_groups)
+        }
+        
+        return final_chunks, analysis
+    else:
+        # Just sort by score and take top chunks
+        sorted_chunks = sorted(chunks, key=lambda x: x['score'], reverse=True)[:FINAL_K]
+        return sorted_chunks, {'consistent_source_found': False, 'total_sources': len(source_groups)}
 
 
 def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str:
+    """Build context with improved formatting"""
+    # First, analyze and filter chunks for consistency
+    filtered_chunks, _ = analyze_context_for_consistency(top_chunks)
+    
+    # If we filtered out chunks, use original top chunks
+    if not filtered_chunks:
+        filtered_chunks = top_chunks
+    
     parts = []
-    for i, c in enumerate(top_chunks, start=1):
+    for i, c in enumerate(filtered_chunks, start=1):
         txt = truncate_text(c.get("text", ""), per_chunk_chars)
-        parts.append(
-            f"SOURCE {i}:\n"
-            f"title={c.get('title','Unknown')} | author={c.get('author','Unknown')} | year={c.get('publish_year')} | page={c.get('page_number')}\n"
-            f"text={txt}\n"
-        )
-    return "\n".join(parts)
+        # Don't label with source numbers in the context
+        parts.append(f"{txt}")
+    
+    # Add a separator between context parts
+    context_text = "\n\n---\n\n".join(parts)
+    
+    return context_text
 
 
 # =========================
-# GROQ GENERATION
+# GROQ GENERATION - IMPROVED
 # =========================
-def groq_generate(prompt: str) -> str:
-    """Generate response using Groq API with improved prompt formatting"""
+def groq_generate(user_question: str, context: str) -> str:
+    """Generate response using Groq API with improved prompt engineering"""
     if not GROQ_API_KEY:
         raise ValueError("Groq API key is missing")
     
-    # Create a well-formatted prompt for Groq
+    # Enhanced prompt with better instructions
+    enhanced_prompt = f"""You are answering questions about Abraham Lincoln based on the provided information.
+
+INFORMATION PROVIDED:
+{context}
+
+QUESTION: {user_question}
+
+IMPORTANT INSTRUCTIONS:
+1. Answer using ONLY the information provided above. Do not use any outside knowledge.
+2. Provide a clear, concise answer in 1-3 sentences.
+3. If the information contains conflicting facts, use the information that appears most consistently or from the most authoritative source.
+4. NEVER mention "source", "context", or reference numbers in your answer.
+5. If the answer isn't in the information, say "Not found in provided documents."
+6. Just state the answer directly and confidently.
+
+ANSWER:"""
+    
     messages = [
         {
             "role": "system",
-            "content": SYSTEM_PROMPT
+            "content": "You are a helpful assistant that provides accurate answers based on given information."
         },
         {
             "role": "user",
-            "content": prompt
+            "content": enhanced_prompt
         }
     ]
     
     payload = {
         "model": GROQ_MODEL,
         "messages": messages,
-        "temperature": 0.1,  # Lower temperature for more factual responses
-        "max_tokens": 300,
+        "temperature": 0.1,  # Very low temperature for factual consistency
+        "max_tokens": 250,
         "top_p": 0.9,
+        "frequency_penalty": 0.2,  # Slight penalty for repetition
+        "presence_penalty": 0.2,   # Slight penalty for repeating themes
         "stream": False
     }
     
@@ -267,11 +355,13 @@ def groq_generate(prompt: str) -> str:
             answer = result["choices"][0]["message"]["content"].strip()
             
             # Clean up the answer
-            if answer.startswith("Answer:"):
-                answer = answer[7:].strip()
-            if answer.startswith("ANSWER:"):
-                answer = answer[7:].strip()
-                
+            answer = answer.replace("ANSWER:", "").replace("Answer:", "").strip()
+            
+            # Remove any source references
+            import re
+            answer = re.sub(r'(?i)(source|context|chunk|excerpt|document)\s*\d+', '', answer)
+            answer = re.sub(r'\[.*?\]', '', answer)  # Remove any bracketed references
+            
             return answer
         else:
             raise ValueError("No response from Groq API")
@@ -328,7 +418,7 @@ def load_rag_resources(project_root: Path):
 
 
 # =========================
-# SEARCH
+# SEARCH - IMPROVED
 # =========================
 def retrieve_chunks(resources: Dict[str, Any], question: str):
     index = resources["index"]
@@ -361,7 +451,12 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
             }
         )
 
+    # Filter and sort
     filtered = [c for c in candidates if isinstance(c.get("text"), str) and c["text"].strip()]
+    
+    # Sort by score (highest first)
+    filtered.sort(key=lambda x: x["score"], reverse=True)
+    
     return filtered[:FINAL_K], candidates
 
 
@@ -625,6 +720,8 @@ def main():
         st.markdown("• Groq API (Llama 3.1)")
         st.markdown("• Google Drive Storage")
         st.markdown("• FAISS Vector Search")
+        st.markdown("---")
+        st.markdown("**Note:** Answers are based on retrieved documents with consistency filtering.")
 
     with right:
         # ✅ TRUE fixed-height scroll container (this prevents the box from growing)
@@ -679,7 +776,7 @@ def main():
             st.session_state.is_typing = True
             st.rerun()
 
-    # Generation step (using Groq API instead of Ollama)
+    # Generation step (using Groq API with improved context handling)
     if st.session_state.is_typing:
         user_q = (st.session_state.pending_user_q or "").strip()
         if not user_q:
@@ -703,21 +800,14 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        # Build a better formatted prompt for Groq
-        prompt = f"""{SYSTEM_PROMPT}
-
-CONTEXT INFORMATION:
-{context}
-
-USER QUESTION: {user_q}
-
-Based ONLY on the context above, provide a clear and concise answer:"""
-
-        with st.spinner("Generating answer with Groq..."):
+        with st.spinner("Generating accurate answer with Groq..."):
             try:
-                answer = groq_generate(prompt)
+                answer = groq_generate(user_q, context)
+                # Post-process to ensure clean answer
+                if "not found" in answer.lower() and "provided documents" in answer.lower():
+                    answer = "Not found in provided documents."
             except Exception as e:
-                answer = f"Error: {type(e).__name__}: {str(e)[:300]}"
+                answer = f"Error: {type(e).__name__}: {str(e)[:200]}"
                 conf = {"confidence": 0}
 
         st.session_state.chat.append(
