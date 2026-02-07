@@ -31,10 +31,10 @@ except ImportError:
 
 
 # =========================
-# CONSTANTS
+# CONSTANTS (NO UI SETTINGS)
 # =========================
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-GROQ_MODEL = "mixtral-8x7b-32768"  # Better model for RAG
+GROQ_MODEL = "llama-3.1-8b-instant"  # Use this model - it's available for free
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TIMEOUT_S = 30
 
@@ -50,21 +50,40 @@ FINAL_K = 5
 PER_CHUNK_CHARS = 900
 
 PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
+
+# ✅ chat fixed height (keep same feel as your picture)
 CHAT_HEIGHT_PX = 420
+
+SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
+
+RULES (must follow):
+1) Use ONLY the provided CONTEXT. Do NOT use outside knowledge.
+2) Answer in 1–3 sentences maximum.
+3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids.
+4) If the answer is not explicitly present in CONTEXT, reply exactly:
+   Not found in provided documents.
+"""
 
 
 # =========================
 # DOWNLOAD FROM GOOGLE DRIVE
 # =========================
 def download_from_drive(file_id: str, destination: Path):
+    """Download file from Google Drive if it doesn't exist"""
     if destination.exists():
         return True
+    
     destination.parent.mkdir(parents=True, exist_ok=True)
+    
     try:
-        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(destination), quiet=False)
+        gdown.download(
+            f"https://drive.google.com/uc?id={file_id}",
+            str(destination),
+            quiet=False
+        )
         return destination.exists()
     except Exception as e:
-        st.warning(f"Could not download {destination.name}: {str(e)}")
+        st.warning(f"Could not download {destination.name} from Google Drive: {str(e)}")
         return False
 
 
@@ -89,14 +108,29 @@ def utc_now_iso() -> str:
 
 def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8-sig", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        buf = ""
+        for raw in f:
+            s = raw.strip()
+            if not s:
                 continue
             try:
-                yield json.loads(line)
-            except:
+                obj = json.loads(s)
+                if isinstance(obj, dict):
+                    yield obj
+                buf = ""
                 continue
+            except Exception:
+                pass
+
+            buf += s
+            try:
+                obj = json.loads(buf)
+                if isinstance(obj, dict):
+                    yield obj
+                    buf = ""
+            except Exception:
+                if len(buf) > 5_000_000:
+                    buf = ""
 
 
 def write_jsonl_line(path: Path, obj: Dict[str, Any]) -> None:
@@ -163,114 +197,85 @@ def truncate_text(s: str, max_chars: int) -> str:
     s = (s or "").strip()
     if len(s) <= max_chars:
         return s
-    return s[:max_chars].rstrip() + "..."
+    return s[:max_chars].rstrip() + " ...[TRUNCATED]"
 
 
 def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str:
-    """Build context with clear formatting"""
-    if not top_chunks:
-        return "No context available."
-    
-    parts = ["RELEVANT DOCUMENT EXCERPTS:"]
+    parts = []
     for i, c in enumerate(top_chunks, start=1):
         txt = truncate_text(c.get("text", ""), per_chunk_chars)
-        source_info = []
-        if c.get('title'):
-            source_info.append(f"Title: {c.get('title')}")
-        if c.get('author'):
-            source_info.append(f"Author: {c.get('author')}")
-        if c.get('publish_year'):
-            source_info.append(f"Year: {c.get('publish_year')}")
-        
-        source_str = " | ".join(source_info) if source_info else "Source information not available"
-        
-        parts.append(f"\n--- Excerpt {i} ---")
-        parts.append(f"[{source_str}]")
-        parts.append(f"{txt}")
-    
+        parts.append(
+            f"SOURCE {i}:\n"
+            f"title={c.get('title','Unknown')} | author={c.get('author','Unknown')} | year={c.get('publish_year')} | page={c.get('page_number')}\n"
+            f"text={txt}\n"
+        )
     return "\n".join(parts)
 
 
 # =========================
-# GROQ GENERATION - WORKING VERSION
+# GROQ GENERATION - SIMPLE AND WORKING
 # =========================
-def groq_generate(context: str, question: str) -> str:
+def groq_generate(prompt: str) -> str:
     """Generate response using Groq API"""
     if not GROQ_API_KEY:
-        return "Error: Groq API key missing"
-    
-    system_prompt = """You are Abraham Lincoln. Answer questions based ONLY on the provided context.
-    
-CRITICAL RULES:
-1. Use ONLY information from the context below
-2. If the answer is NOT in the context, say: "Not found in provided documents."
-3. Keep answers concise (1-3 sentences)
-4. Answer naturally as Abraham Lincoln
-5. Do NOT mention that you're using context
-6. Do NOT cite sources or use phrases like "according to the context"
-"""
-    
-    user_prompt = f"""CONTEXT:
-{context}
-
-QUESTION: {question}
-
-Answer as Abraham Lincoln using ONLY the context above. If unsure, say "Not found in provided documents."""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
-    
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 250,
-        "top_p": 0.9,
-        "stream": False
-    }
+        return "Error: Groq API key is missing"
     
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 300,
+        "top_p": 0.9,
+        "stream": False
+    }
+    
     try:
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
         
         if response.status_code != 200:
-            return f"API Error {response.status_code}"
+            # Try to get error details
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", response.text[:200])
+            except:
+                error_msg = response.text[:200]
+            
+            st.error(f"Groq API Error {response.status_code}: {error_msg}")
+            return f"API Error: {response.status_code}"
         
         result = response.json()
         
         if "choices" in result and len(result["choices"]) > 0:
             answer = result["choices"][0]["message"]["content"].strip()
             
-            # Clean up common prefixes
-            prefixes = [
-                "Based on the context,",
-                "According to the context,",
-                "The context states that",
-                "In the provided context,",
-                "As Abraham Lincoln,",
-                "As the context shows,"
-            ]
-            
-            for prefix in prefixes:
-                if answer.lower().startswith(prefix.lower()):
-                    answer = answer[len(prefix):].strip()
-            
-            return answer if answer else "Not found in provided documents."
+            # Clean up the answer
+            if answer.startswith("Answer:"):
+                answer = answer[7:].strip()
+            elif answer.startswith("ANSWER:"):
+                answer = answer[7:].strip()
+                
+            return answer
         else:
             return "Not found in provided documents."
             
+    except requests.exceptions.ConnectionError:
+        return "Connection error: Cannot connect to Groq API"
+    except requests.exceptions.Timeout:
+        return "Timeout error: Groq API took too long to respond"
     except Exception as e:
-        return f"Error: {str(e)[:100]}"
+        return f"Error: {str(e)[:200]}"
 
 
 # =========================
-# LOAD RESOURCES
+# LOAD RESOURCES (CACHED)
 # =========================
 @st.cache_resource(show_spinner=True)
 def load_rag_resources(project_root: Path):
@@ -281,10 +286,18 @@ def load_rag_resources(project_root: Path):
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
 
-    # Download files if needed
-    download_from_drive(FAISS_FILE_ID, index_path)
-    download_from_drive(META_FILE_ID, meta_path)
-    download_from_drive(CHUNKS_FILE_ID, chunks_path)
+    # Download files from Google Drive if needed
+    with st.spinner("Checking for FAISS index..."):
+        if not index_path.exists():
+            download_from_drive(FAISS_FILE_ID, index_path)
+    
+    with st.spinner("Checking for metadata..."):
+        if not meta_path.exists():
+            download_from_drive(META_FILE_ID, meta_path)
+    
+    with st.spinner("Checking for chunks data..."):
+        if not chunks_path.exists():
+            download_from_drive(CHUNKS_FILE_ID, chunks_path)
 
     if not index_path.exists():
         raise FileNotFoundError(f"FAISS index not found: {index_path}")
@@ -303,6 +316,7 @@ def load_rag_resources(project_root: Path):
         "meta_rows": meta_rows,
         "chunk_text": chunk_text,
         "emb_model": emb_model,
+        "paths": {"index": index_path, "meta": meta_path, "chunks": chunks_path},
     }
 
 
@@ -324,9 +338,8 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
             continue
         m = meta_rows[idx]
         cid = m.get("chunk_id")
-        txt = chunk_text.get(cid, "")
-        if txt.strip():
-            candidates.append({
+        candidates.append(
+            {
                 "score": float(score),
                 "chunk_id": cid,
                 "doc_id": m.get("doc_id"),
@@ -337,66 +350,254 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
                 "scan_source": m.get("scan_source"),
                 "source_url": m.get("source_url"),
                 "page_number": m.get("page_number"),
-                "text": txt,
-            })
+                "text": chunk_text.get(cid, ""),
+            }
+        )
 
-    # Sort by score and take top FINAL_K
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates[:FINAL_K], candidates
+    filtered = [c for c in candidates if isinstance(c.get("text"), str) and c["text"].strip()]
+    return filtered[:FINAL_K], candidates
 
 
 # =========================
-# UI (SAME AS BEFORE)
+# UI (EXACTLY THE SAME AS YOUR ORIGINAL)
 # =========================
 def inject_css():
-    st.markdown("""
-    <style>
-    .stApp { background: #2d2a25; }
-    .lincoln-top {
-        background: linear-gradient(180deg, #3b6b8a 0%, #2f556f 100%);
-        border-radius: 10px; padding: 14px 18px; margin: 6px 0 12px 0;
-        color: #f5e8cf; text-align:center; font-family: Georgia; 
-        font-weight: 900; letter-spacing: 1px; text-transform: uppercase; font-size: 26px;
-    }
-    .leftTitle { font-family: Georgia; font-size: 22px; font-weight: 900; color: #f3e7cf; margin-top: 12px; }
-    .leftSub { color: rgba(243,231,207,0.85); font-size: 13px; margin-top: 2px; margin-bottom: 6px; }
-    .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
-    .avatar { width: 34px; height: 34px; border-radius: 50%; background: rgba(0,0,0,0.12); 
-              border: 1px solid rgba(0,0,0,0.18); display:flex; align-items:center; 
-              justify-content:center; font-family: Georgia; font-weight: 900; color: rgba(0,0,0,0.65); }
-    .bubble { border-radius: 12px; padding: 10px 12px; border: 1px solid rgba(0,0,0,0.18);
-              box-shadow: 0 6px 12px rgba(0,0,0,0.12); line-height: 1.35; max-width: 92%; word-wrap: break-word; }
-    .assistant { background: rgba(255,255,255,0.65); }
-    .user { background: rgba(220,235,245,0.70); margin-left:auto; }
-    .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
-    .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
-    .stButton > button { background: #0f172a; color: #ffffff; border-radius: 10px; padding: 10px 16px; font-weight: 800; }
-    .stButton > button:hover { background: #111c35; }
-    </style>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+          .stApp { background: #2d2a25; }
+          header[data-testid="stHeader"] { background: transparent; }
+          footer { visibility: hidden; }
+
+          .lincoln-top {
+            background: linear-gradient(180deg, #3b6b8a 0%, #2f556f 100%);
+            border: 1px solid rgba(0,0,0,0.35);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin: 6px 0 12px 0;
+            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
+            color: #f5e8cf;
+            text-align:center;
+            font-family: Georgia, 'Times New Roman', serif;
+            font-weight: 900;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            font-size: 26px;
+          }
+
+          /* Style ONLY the first main two-column block */
+          div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stVerticalBlock"]{
+            background: rgba(80,55,30,0.35);
+            border: 1px solid rgba(0,0,0,0.35);
+            border-radius: 10px;
+            padding: 14px;
+            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
+          }
+          div[data-testid="stHorizontalBlock"] > div:nth-child(2) div[data-testid="stVerticalBlock"]{
+            background: linear-gradient(180deg, rgba(246,235,212,0.96) 0%, rgba(235,217,185,0.96) 100%);
+            border: 1px solid rgba(0,0,0,0.35);
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
+          }
+
+          .leftTitle {
+            font-family: Georgia, 'Times New Roman', serif;
+            font-size: 22px;
+            font-weight: 900;
+            color: #f3e7cf;
+            margin-top: 12px;
+          }
+          .leftSub {
+            color: rgba(243,231,207,0.85);
+            font-size: 13px;
+            margin-top: 2px;
+            margin-bottom: 6px;
+          }
+
+          /* Chat bubbles (text black) */
+          .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
+          .bubble { color:#000 !important; }
+
+          .avatar {
+            width: 34px; height: 34px; border-radius: 50%;
+            background: rgba(0,0,0,0.12);
+            border: 1px solid rgba(0,0,0,0.18);
+            display:flex; align-items:center; justify-content:center;
+            font-family: Georgia, serif; font-weight: 900; color: rgba(0,0,0,0.65);
+            flex: 0 0 auto;
+          }
+          .bubble {
+            border-radius: 12px;
+            padding: 10px 12px;
+            border: 1px solid rgba(0,0,0,0.18);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.12);
+            line-height: 1.35;
+            max-width: 92%;
+            word-wrap: break-word;
+          }
+          .assistant { background: rgba(255,255,255,0.65); }
+          .user { background: rgba(220,235,245,0.70); margin-left:auto; }
+
+          .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
+          .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
+
+          /* Send button */
+          .stButton > button {
+            background: #0f172a;
+            color: #ffffff;
+            border: 1px solid rgba(0,0,0,0.35);
+            border-radius: 10px;
+            padding: 10px 16px;
+            font-weight: 800;
+          }
+          .stButton > button:hover { background: #111c35; color: #fff; }
+
+          /* Remove extra boxes around input */
+          div[data-testid="stForm"], div[data-testid="stForm"] > div {
+            background: transparent !important;
+            border: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            box-shadow: none !important;
+          }
+          div[data-testid="stHorizontalBlock"] div[data-testid="column"] {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+          }
+
+          /* Input style (single box) */
+          div[data-testid="stTextInput"] input {
+            width: 100% !important;
+            background: rgba(255,255,255,0.65) !important;
+            border: 1px solid rgba(0,0,0,0.25) !important;
+            border-radius: 10px !important;
+            padding: 14px 14px !important;
+            color: rgba(0,0,0,0.75) !important;
+            box-shadow: none !important;
+          }
+          div[data-testid="stTextInput"] input::placeholder { color: rgba(0,0,0,0.45) !important; }
+
+          /* Typing animation dots */
+          .typing {
+            display: inline-flex;
+            gap: 6px;
+            align-items: center;
+            padding: 10px 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(0,0,0,0.18);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.12);
+            background: rgba(255,255,255,0.65);
+          }
+          .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: rgba(0,0,0,0.45);
+            animation: blink 1.2s infinite;
+          }
+          .dot:nth-child(2){ animation-delay: 0.2s; }
+          .dot:nth-child(3){ animation-delay: 0.4s; }
+
+          @keyframes blink {
+            0%, 80%, 100% { opacity: 0.25; transform: translateY(0px); }
+            40% { opacity: 1; transform: translateY(-2px); }
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_topbar():
+    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ)</div>', unsafe_allow_html=True)
+
+
+def show_portrait():
+    p = Path(PORTRAIT_PATH)
+    if p.exists():
+        st.image(str(p), use_container_width=True)
+    else:
+        st.warning("Portrait not found. Check PORTRAIT_PATH.")
+
+
+def render_chat_bubble(role: str, text: str, confidence: Optional[int] = None):
+    if role == "user":
+        st.markdown(
+            f'<div class="row" style="justify-content:flex-end;">'
+            f'  <div class="bubble user"><b>You</b>&nbsp;&nbsp; {text}</div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        conf_html = ""
+        if confidence is not None:
+            conf_html = f'<div class="metaLine">Confidence: <b>{confidence}/100</b></div>'
+        st.markdown(
+            f'<div class="row">'
+            f'  <div class="avatar">AL</div>'
+            f'  <div>'
+            f'    <div class="bubble assistant">{text}</div>'
+            f'    {conf_html}'
+            f'  </div>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def render_typing_indicator():
+    st.markdown(
+        """
+        <div class="row">
+          <div class="avatar">AL</div>
+          <div class="typing" aria-label="typing">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def autoscroll_inside_chat():
+    # This scrolls INSIDE the fixed-height st.container() (not the whole page)
+    st.markdown(
+        """
+        <script>
+          (function() {
+            const root = window.parent.document;
+            const el = root.getElementById('chat-scroll-anchor');
+            if (el) el.scrollIntoView({behavior:'smooth', block:'end'});
+          })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def main():
     st.set_page_config(page_title="The Abraham Lincoln Chatbot", layout="wide")
     inject_css()
-    
-    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ)</div>', unsafe_allow_html=True)
-    
+    render_topbar()
+
+    # Check for Groq API key
     if not GROQ_API_KEY:
-        st.error("❌ Groq API key missing! Add to secrets.toml")
+        st.error("❌ Groq API key is missing! Please add it to your Streamlit secrets.toml file.")
+        st.info("Add this to your `.streamlit/secrets.toml` file:\n\nGROQ_API_KEY = \"your-groq-api-key-here\"")
         st.stop()
-    
+
     script_dir = Path(__file__).resolve().parent
     project_root = find_project_root(script_dir)
     history_path = project_root / "rag_history" / "rag_history.jsonl"
-    
+
     try:
         resources = load_rag_resources(project_root)
     except Exception as e:
         st.error(str(e))
         st.stop()
-    
-    # State
+
+    # state
     if "chat" not in st.session_state:
         st.session_state.chat = []
     if "show_context" not in st.session_state:
@@ -405,142 +606,174 @@ def main():
         st.session_state.is_typing = False
     if "pending_user_q" not in st.session_state:
         st.session_state.pending_user_q = ""
-    
+
     left, right = st.columns([1, 2.2], gap="large")
-    
+
     with left:
-        p = Path(PORTRAIT_PATH)
-        if p.exists():
-            st.image(str(p), use_container_width=True)
-        else:
-            st.warning("Portrait not found")
+        show_portrait()
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**Powered by:**")
-        st.markdown("• Groq API")
+        st.markdown("• Groq API (Llama 3.1)")
+        st.markdown("• Google Drive Storage")
         st.markdown("• FAISS Vector Search")
-    
+
     with right:
+        # ✅ TRUE fixed-height scroll container (this prevents the box from growing)
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
+
         with chat_area:
             if not st.session_state.chat:
-                st.markdown("""
-                <div class="row">
-                  <div class="avatar">AL</div>
-                  <div class="bubble assistant">Hello there! I am Abraham Lincoln. How can I assist you today?</div>
-                </div>
-                """, unsafe_allow_html=True)
-            
+                render_chat_bubble("assistant", "Hello there! I am Abraham Lincoln. How can I assist you today?")
+
             for msg in st.session_state.chat[-200:]:
                 if msg["role"] == "user":
-                    st.markdown(f"""
-                    <div class="row" style="justify-content:flex-end;">
-                      <div class="bubble user"><b>You</b>&nbsp;&nbsp; {msg['text']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    render_chat_bubble("user", msg["text"])
                 else:
-                    conf_html = f'<div class="metaLine">Confidence: <b>{msg.get("confidence", 0)}/100</b></div>' if msg.get("confidence") is not None else ""
-                    st.markdown(f"""
-                    <div class="row">
-                      <div class="avatar">AL</div>
-                      <div>
-                        <div class="bubble assistant">{msg['text']}</div>
-                        {conf_html}
-                      </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            
+                    render_chat_bubble("assistant", msg["text"], confidence=msg.get("confidence"))
+
             if st.session_state.is_typing:
-                st.markdown("""
-                <div class="row">
-                  <div class="avatar">AL</div>
-                  <div class="typing">
-                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-                  </div>
-                </div>
-                <style>
-                .typing { display: inline-flex; gap: 6px; align-items: center; padding: 10px 12px;
-                          border-radius: 12px; border: 1px solid rgba(0,0,0,0.18); background: rgba(255,255,255,0.65); }
-                .dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(0,0,0,0.45); animation: blink 1.2s infinite; }
-                .dot:nth-child(2){ animation-delay: 0.2s; } .dot:nth-child(3){ animation-delay: 0.4s; }
-                @keyframes blink { 0%,80%,100% { opacity: 0.25; } 40% { opacity: 1; } }
-                </style>
-                """, unsafe_allow_html=True)
-            
+                render_typing_indicator()
+
+            # anchor must be INSIDE the scroll container
             st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
-        
+
+        # auto-scroll after chat renders
+        autoscroll_inside_chat()
+
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-        st.session_state.show_context = st.checkbox("Show retrieved context", value=st.session_state.show_context)
-        
+
+        st.session_state.show_context = st.checkbox(
+            "Show retrieved context (inside Sources)",
+            value=st.session_state.show_context,
+        )
+
         with st.form("chat_form", clear_on_submit=True):
             in_col, send_col = st.columns([5, 1])
             with in_col:
-                question = st.text_input("Type your message...", label_visibility="collapsed", placeholder="Type your message...")
+                question = st.text_input(
+                    "Type your message...",
+                    value="",
+                    label_visibility="collapsed",
+                    placeholder="Type your message...",
+                )
             with send_col:
                 send = st.form_submit_button("Send", use_container_width=True)
-        
-        if send and question.strip():
-            st.session_state.chat.append({"role": "user", "text": question.strip()})
-            st.session_state.pending_user_q = question.strip()
+
+        if send:
+            user_q = (question or "").strip()
+            if not user_q:
+                st.warning("Please type a message.")
+                st.stop()
+
+            st.session_state.chat.append({"role": "user", "text": user_q})
+            st.session_state.pending_user_q = user_q
             st.session_state.is_typing = True
             st.rerun()
-    
-    # Generation
+
+    # Generation step (using Groq API)
     if st.session_state.is_typing:
-        user_q = st.session_state.pending_user_q.strip()
-        
-        with st.spinner("Searching documents..."):
+        user_q = (st.session_state.pending_user_q or "").strip()
+        if not user_q:
+            st.session_state.is_typing = False
+            st.stop()
+
+        with st.spinner("Retrieving relevant chunks..."):
             top_chunks, _ = retrieve_chunks(resources, user_q)
-        
+
         if not top_chunks:
             answer = "Not found in provided documents."
             st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": 0, "sources": []})
-            write_jsonl_line(history_path, {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0})
+            write_jsonl_line(
+                history_path,
+                {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []},
+            )
             st.session_state.is_typing = False
             st.session_state.pending_user_q = ""
             st.rerun()
-        
+
         conf = compute_confidence(top_chunks)
-        context = build_context(top_chunks, PER_CHUNK_CHARS)
-        
-        with st.spinner("Generating answer..."):
-            answer = groq_generate(context, user_q)
-        
-        st.session_state.chat.append({
-            "role": "assistant", 
-            "text": answer, 
-            "confidence": conf.get("confidence", 0), 
-            "sources": top_chunks
-        })
-        
-        write_jsonl_line(history_path, {
-            "ts": utc_now_iso(),
-            "question": user_q,
-            "answer": answer,
-            "confidence": conf.get("confidence", 0),
-            "confidence_details": conf,
-            "sources": [{
-                "score": c.get("score"),
-                "chunk_id": c.get("chunk_id"),
-                "title": c.get("title"),
-                "author": c.get("author"),
-                "text": c.get("text")[:200] + "..." if len(c.get("text", "")) > 200 else c.get("text", "")
-            } for c in top_chunks]
-        })
-        
+        context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
+
+        # Build the prompt - EXACT SAME as phi3:mini
+        prompt = f"""{SYSTEM_PROMPT}
+
+CONTEXT:
+{context}
+
+QUESTION:
+{user_q}
+
+ANSWER:
+"""
+
+        with st.spinner("Generating answer with Groq..."):
+            try:
+                answer = groq_generate(prompt)
+                # Debug: Show prompt in expander
+                with st.expander("Debug: See what was sent to Groq"):
+                    st.write("**Prompt:**")
+                    st.text(prompt[:1000] + "..." if len(prompt) > 1000 else prompt)
+                    st.write("**Answer:**")
+                    st.text(answer)
+            except Exception as e:
+                answer = f"Error generating answer: {type(e).__name__}: {str(e)[:300]}"
+                conf = {"confidence": 0}
+
+        st.session_state.chat.append(
+            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks}
+        )
+
+        write_jsonl_line(
+            history_path,
+            {
+                "ts": utc_now_iso(),
+                "question": user_q,
+                "answer": answer,
+                "confidence": conf.get("confidence", 0),
+                "confidence_details": conf,
+                "sources": [
+                    {
+                        "score": c.get("score"),
+                        "chunk_id": c.get("chunk_id"),
+                        "doc_id": c.get("doc_id"),
+                        "title": c.get("title"),
+                        "author": c.get("author"),
+                        "publish_year": c.get("publish_year"),
+                        "publisher": c.get("publisher"),
+                        "scan_source": c.get("scan_source"),
+                        "source_url": c.get("source_url"),
+                        "page_number": c.get("page_number"),
+                    }
+                    for c in top_chunks
+                ],
+            },
+        )
+
         st.session_state.is_typing = False
         st.session_state.pending_user_q = ""
         st.rerun()
-    
-    # Sources
-    last = next((m for m in reversed(st.session_state.chat) if m.get("role") == "assistant" and m.get("sources")), None)
+
+    # SOURCES (unchanged)
+    last = None
+    for m in reversed(st.session_state.chat):
+        if m.get("role") == "assistant" and m.get("sources"):
+            last = m
+            break
+
     if last and last.get("sources"):
-        st.markdown("### 📌 Sources")
-        for i, c in enumerate(last["sources"], 1):
-            with st.expander(f"{i}. Score: {c['score']:.3f} | {c.get('title', 'Unknown')}"):
-                st.write(f"**Author:** {c.get('author', 'Unknown')}")
-                st.write(f"**Year:** {c.get('publish_year', 'Unknown')}")
+        st.markdown("### 📌 Sources (real)")
+        for i, c in enumerate(last["sources"], start=1):
+            with st.expander(
+                f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"
+            ):
+                st.write(f"**Title:** {c.get('title')}")
+                st.write(f"**Author:** {c.get('author')}")
+                st.write(f"**Year:** {c.get('publish_year')}")
+                st.write(f"**Publisher:** {c.get('publisher')}")
+                st.write(f"**Chunk ID:** `{c.get('chunk_id')}`")
+                st.write(f"**Source URL:** {c.get('source_url')}")
                 if st.session_state.show_context:
                     st.divider()
                     st.write(c.get("text", ""))
