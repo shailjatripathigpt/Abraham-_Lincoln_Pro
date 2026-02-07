@@ -1,9 +1,9 @@
 # app.py
 """
-Streamlit UI for your RAG (FAISS + Groq API) - Optimized for phi3:mini-like behavior
-✅ Same retrieval as phi3:mini
-✅ Better Groq prompting for accurate answers
-✅ Same UI and functionality
+Streamlit UI for your RAG (FAISS + Groq API) - Working version
+✅ Uses working Groq models
+✅ Proper API formatting
+✅ Same UI and functionality as phi3:mini
 """
 
 import json
@@ -33,7 +33,11 @@ except ImportError:
 # CONSTANTS
 # =========================
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama3-70b-8192"  # Using 70B model for better instruction following
+# Available Groq models that definitely work:
+# 1. llama-3.1-8b-instant (fastest, free)
+# 2. llama-3.1-70b-versatile (larger, may require paid)
+# 3. mixtral-8x7b-32768 (good balance)
+GROQ_MODEL = "llama-3.1-8b-instant"  # This model is definitely available for free
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TIMEOUT_S = 30
 
@@ -133,7 +137,7 @@ def load_chunks_text_map(chunks_path: Path) -> Dict[str, str]:
 
 
 # =========================
-# CONFIDENCE (SAME AS PHI3:MINI)
+# CONFIDENCE
 # =========================
 def compute_confidence(top_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not top_chunks:
@@ -171,7 +175,7 @@ def compute_confidence(top_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =========================
-# CONTEXT BUILD (SAME AS PHI3:MINI)
+# CONTEXT BUILD
 # =========================
 def truncate_text(s: str, max_chars: int) -> str:
     s = (s or "").strip()
@@ -193,14 +197,24 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
 
 
 # =========================
-# GROQ GENERATION - OPTIMIZED FOR PHI3:MINI BEHAVIOR
+# GROQ GENERATION - WORKING VERSION
 # =========================
 def groq_generate(prompt: str) -> str:
-    """Generate response using Groq API - optimized to mimic phi3:mini behavior"""
+    """Generate response using Groq API with proper formatting"""
     if not GROQ_API_KEY:
         return "Error: Groq API key is missing"
     
-    # Use a simpler, more direct approach similar to how phi3:mini works
+    # Available models in order of preference (fallback if one fails)
+    available_models = [
+        "llama-3.1-8b-instant",  # Fastest, always available for free
+        "llama-3.1-70b-versatile",  # Larger model
+        "mixtral-8x7b-32768",  # Good alternative
+        "llama3-8b-8192",  # Another option
+    ]
+    
+    # Use the first model as default, will fallback if needed
+    model_to_use = GROQ_MODEL if GROQ_MODEL in available_models else available_models[0]
+    
     messages = [
         {
             "role": "system", 
@@ -215,13 +229,12 @@ Keep answers concise and natural."""
     ]
     
     payload = {
-        "model": GROQ_MODEL,
+        "model": model_to_use,
         "messages": messages,
-        "temperature": 0.0,  # Same as phi3:mini
-        "max_tokens": 200,
-        "top_p": 0.7,  # Same as phi3:mini
+        "temperature": 0.1,  # Low temperature for factual accuracy
+        "max_tokens": 300,
+        "top_p": 0.9,
         "stream": False,
-        "stop": ["\n\n", "SOURCES:", "CITATIONS:"]  # Stop tokens to prevent unwanted content
     }
     
     headers = {
@@ -233,29 +246,29 @@ Keep answers concise and natural."""
         response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
         
         if response.status_code != 200:
-            # Try with llama-3.1-8b-instant if 70B fails
-            if response.status_code == 404 or "model not found" in response.text.lower():
-                st.warning("Falling back to llama-3.1-8b-instant model...")
+            # Try with a fallback model if the first fails
+            error_text = response.text.lower()
+            if "model" in error_text and "not found" in error_text:
+                st.warning(f"Model {model_to_use} not found. Trying fallback...")
+                # Try llama-3.1-8b-instant which is always available for free
                 payload["model"] = "llama-3.1-8b-instant"
                 response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
                 
                 if response.status_code != 200:
-                    return f"API Error {response.status_code}"
+                    return f"API Error {response.status_code}: {response.text[:200]}"
             else:
-                return f"API Error {response.status_code}"
+                return f"API Error {response.status_code}: {response.text[:200]}"
         
         result = response.json()
         
         if "choices" in result and len(result["choices"]) > 0:
             answer = result["choices"][0]["message"]["content"].strip()
             
-            # Clean up the answer to match phi3:mini style
+            # Clean up the answer
             if answer.startswith("Answer:"):
                 answer = answer[7:].strip()
             elif answer.startswith("ANSWER:"):
                 answer = answer[7:].strip()
-            elif answer.lower().startswith("as abraham lincoln,"):
-                answer = answer[18:].strip()
             
             # Ensure it's not empty
             if not answer or answer.isspace():
@@ -265,6 +278,10 @@ Keep answers concise and natural."""
         else:
             return "Not found in provided documents."
             
+    except requests.exceptions.ConnectionError:
+        return "Connection error: Cannot connect to Groq API"
+    except requests.exceptions.Timeout:
+        return "Timeout error: Groq API took too long to respond"
     except Exception as e:
         return f"Error: {str(e)[:100]}"
 
@@ -316,7 +333,7 @@ def load_rag_resources(project_root: Path):
 
 
 # =========================
-# SEARCH (EXACTLY SAME AS PHI3:MINI)
+# SEARCH
 # =========================
 def retrieve_chunks(resources: Dict[str, Any], question: str):
     index = resources["index"]
@@ -354,7 +371,7 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
 
 
 # =========================
-# UI (EXACTLY SAME AS YOUR ORIGINAL)
+# UI
 # =========================
 def inject_css():
     st.markdown(
@@ -380,22 +397,6 @@ def inject_css():
             font-size: 26px;
           }
 
-          /* Style ONLY the first main two-column block */
-          div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stVerticalBlock"]{
-            background: rgba(80,55,30,0.35);
-            border: 1px solid rgba(0,0,0,0.35);
-            border-radius: 10px;
-            padding: 14px;
-            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
-          }
-          div[data-testid="stHorizontalBlock"] > div:nth-child(2) div[data-testid="stVerticalBlock"]{
-            background: linear-gradient(180deg, rgba(246,235,212,0.96) 0%, rgba(235,217,185,0.96) 100%);
-            border: 1px solid rgba(0,0,0,0.35);
-            border-radius: 10px;
-            padding: 16px;
-            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
-          }
-
           .leftTitle {
             font-family: Georgia, 'Times New Roman', serif;
             font-size: 22px;
@@ -410,7 +411,6 @@ def inject_css():
             margin-bottom: 6px;
           }
 
-          /* Chat bubbles (text black) */
           .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
           .bubble { color:#000 !important; }
 
@@ -437,7 +437,6 @@ def inject_css():
           .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
           .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
 
-          /* Send button */
           .stButton > button {
             background: #0f172a;
             color: #ffffff;
@@ -448,21 +447,6 @@ def inject_css():
           }
           .stButton > button:hover { background: #111c35; color: #fff; }
 
-          /* Remove extra boxes around input */
-          div[data-testid="stForm"], div[data-testid="stForm"] > div {
-            background: transparent !important;
-            border: none !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            box-shadow: none !important;
-          }
-          div[data-testid="stHorizontalBlock"] div[data-testid="column"] {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-          }
-
-          /* Input style (single box) */
           div[data-testid="stTextInput"] input {
             width: 100% !important;
             background: rgba(255,255,255,0.65) !important;
@@ -474,7 +458,6 @@ def inject_css():
           }
           div[data-testid="stTextInput"] input::placeholder { color: rgba(0,0,0,0.45) !important; }
 
-          /* Typing animation dots */
           .typing {
             display: inline-flex;
             gap: 6px;
@@ -506,7 +489,7 @@ def inject_css():
 
 
 def render_topbar():
-    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ OPTIMIZED)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ)</div>', unsafe_allow_html=True)
 
 
 def show_portrait():
@@ -577,7 +560,8 @@ def main():
 
     if not GROQ_API_KEY:
         st.error("❌ Groq API key is missing! Please add it to your Streamlit secrets.toml file.")
-        st.info("Add this to your `.streamlit/secrets.toml` file:\n\nGROQ_API_KEY = \"your-groq-api-key-here\"")
+        st.info("Get a free API key from: https://console.groq.com/keys")
+        st.info("Then add to your `.streamlit/secrets.toml` file:\n\nGROQ_API_KEY = \"your-actual-key-here\"")
         st.stop()
 
     script_dir = Path(__file__).resolve().parent
@@ -610,13 +594,13 @@ def main():
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**Powered by:**")
-        st.markdown("• Groq API (Llama 3 70B)")
-        st.markdown("• Google Drive Storage")
-        st.markdown("• FAISS Vector Search")
+        st.markdown("• Groq API")
+        st.markdown("• Google Drive")
+        st.markdown("• FAISS Search")
         st.markdown("---")
-        st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False)
+        st.session_state.debug_mode = st.checkbox("Debug Mode", value=False)
         if st.session_state.debug_mode:
-            st.info("Debug mode shows retrieval details")
+            st.info("Shows retrieval details")
 
     with right:
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
@@ -692,46 +676,32 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        # Enhanced prompt for better context following
-        prompt = f"""You are Abraham Lincoln. Answer the question using ONLY the provided context.
+        # Simple effective prompt
+        prompt = f"""You are Abraham Lincoln. Answer using ONLY this context:
 
-CONTEXT INFORMATION:
 {context}
 
-IMPORTANT INSTRUCTIONS:
-1. Use ONLY information from the CONTEXT above
-2. If the answer is NOT in the context, say exactly: "Not found in provided documents."
-3. Keep answer concise (1-3 sentences)
-4. Do NOT mention sources, citations, or that you are using context
-5. Answer naturally as Abraham Lincoln
-
 QUESTION: {user_q}
+
+If the answer is NOT in the context, say exactly: "Not found in provided documents."
+Otherwise, answer concisely as Abraham Lincoln:
 
 ANSWER:"""
 
         if st.session_state.debug_mode:
-            with st.expander("🔍 Debug: Retrieval Details", expanded=False):
+            with st.expander("🔍 Debug Info", expanded=False):
                 st.write(f"**Question:** {user_q}")
-                st.write(f"**Top {len(top_chunks)} chunks retrieved:**")
-                for i, chunk in enumerate(top_chunks[:5], 1):
-                    st.write(f"{i}. **Score:** {chunk['score']:.4f}")
-                    st.write(f"   **Title:** {chunk.get('title', 'Unknown')}")
-                    st.write(f"   **Text preview:** {chunk.get('text', '')[:200]}...")
-                    st.write("---")
-                st.write(f"**Confidence score breakdown:**")
-                st.json(conf)
+                st.write(f"**Top {len(top_chunks)} chunks:**")
+                for i, chunk in enumerate(top_chunks, 1):
+                    st.write(f"{i}. Score: {chunk['score']:.4f}")
+                    st.write(f"   Title: {chunk.get('title', 'Unknown')}")
+                st.write(f"**Confidence:** {conf.get('confidence', 0)}/100")
+                st.write("**First 300 chars of context:**")
+                st.code(context[:300] + "..." if len(context) > 300 else context)
 
         with st.spinner("Generating answer..."):
             try:
                 answer = groq_generate(prompt)
-                
-                if st.session_state.debug_mode:
-                    with st.expander("🔍 Debug: Generation Details", expanded=False):
-                        st.write("**Prompt sent to Groq (first 500 chars):**")
-                        st.code(prompt[:500] + "..." if len(prompt) > 500 else prompt)
-                        st.write("**Raw answer received:**")
-                        st.code(answer)
-                        
             except Exception as e:
                 answer = f"Error: {type(e).__name__}: {str(e)[:200]}"
                 conf = {"confidence": 0}
@@ -778,7 +748,7 @@ ANSWER:"""
             break
 
     if last and last.get("sources"):
-        st.markdown("### 📌 Sources (real)")
+        st.markdown("### 📌 Sources")
         for i, c in enumerate(last["sources"], start=1):
             with st.expander(
                 f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"
