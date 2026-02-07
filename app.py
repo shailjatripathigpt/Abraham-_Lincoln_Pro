@@ -1,30 +1,17 @@
 # app.py
 """
-Streamlit UI for your RAG (FAISS + Ollama phi3:mini) with:
-✅ Ask question -> Top chunks -> Answer
-✅ Confidence score
-✅ Saves history to PROJECT_ROOT/rag_history/rag_history.jsonl
-
-UI extras added (NO change to RAG functionality):
-✅ Fixed-height scrollable chat box (TRUE fixed height using st.container(height=...))
-✅ Auto-scroll to latest answer (scrolls inside the chat box, not page)
-✅ Typing animation (visual only)
-
-ADDED (without changing RAG retrieval / UI flow):
-✅ Groq answering (better answers) + fallback to Ollama
-✅ Google Drive service account integration (optional) to upload rag_history.jsonl
+Streamlit UI for your RAG (FAISS + Groq API) with improved context following
 """
 
 import json
-import os
-import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any, Iterable, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Optional
 
 import numpy as np
 import requests
 import streamlit as st
+import gdown
 
 try:
     import faiss
@@ -38,68 +25,43 @@ except ImportError:
     st.error("sentence-transformers not installed. Run: pip install sentence-transformers")
     raise
 
-# --- Optional (Google Drive upload) ---
-# Install if you want Drive upload:
-# pip install google-api-python-client google-auth
-try:
-    from google.oauth2.service_account import Credentials
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-
-    _GDRIVE_OK = True
-except Exception:
-    _GDRIVE_OK = False
-
 
 # =========================
-# CONSTANTS (NO UI SETTINGS)
+# CONSTANTS
 # =========================
-OLLAMA_MODEL = "phi3:mini"
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_TIMEOUT_S = 30
+
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-OLLAMA_URL = "http://127.0.0.1:11434"
-OLLAMA_TIMEOUT_S = 600
-OLLAMA_NUM_CTX = 2048
-OLLAMA_NUM_PREDICT = 160
 
-# ✅ Groq settings (better answering)
-# Put key in Streamlit secrets or env:
-# - st.secrets["GROQ_API_KEY"] = "..."
-# or environment: GROQ_API_KEY=...
-GROQ_MODEL = "llama-3.1-70b-versatile"  # you can change anytime
-GROQ_TIMEOUT_S = 60
+# Google Drive IDs
+FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
+META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
+CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
-TOP_K = 15
-FINAL_K = 5
-PER_CHUNK_CHARS = 900
+TOP_K = 20  # Increased to get more chunks
+FINAL_K = 7  # Increased to use more chunks
+PER_CHUNK_CHARS = 700  # Slightly reduced for better context
 
 PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
-
-# ✅ chat fixed height (keep same feel as your picture)
 CHAT_HEIGHT_PX = 420
 
-# ✅ Stronger grounding + better phrasing (still strict rules)
-SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
 
-HARD RULES (must follow):
-1) Use ONLY the provided CONTEXT. Do NOT use outside knowledge.
-2) Answer in 1–3 sentences maximum.
-3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids, do NOT mention "context says".
-4) If the answer is not explicitly present in CONTEXT, reply exactly:
-   Not found in provided documents.
-
-ANSWER QUALITY:
-- Be direct and specific.
-- Prefer exact names/dates/places stated in CONTEXT.
-- If multiple facts are present, combine them into 1–3 clean sentences.
-"""
-
-# ✅ Google Drive (optional): auto-upload history file after each answer
-# Put service account json in st.secrets (recommended) or env.
-# REQUIRED secrets (suggested):
-# st.secrets["GDRIVE_SERVICE_ACCOUNT_JSON"] = { ... full json ... }
-# st.secrets["GDRIVE_FOLDER_ID"] = "your_drive_folder_id"
-UPLOAD_HISTORY_TO_DRIVE = False  # set True if you want auto-upload
-GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# =========================
+# DOWNLOAD FROM GOOGLE DRIVE
+# =========================
+def download_from_drive(file_id: str, destination: Path):
+    if destination.exists():
+        return True
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(destination), quiet=False)
+        return destination.exists()
+    except Exception as e:
+        st.warning(f"Could not download {destination.name}: {str(e)}")
+        return False
 
 
 # =========================
@@ -123,29 +85,14 @@ def utc_now_iso() -> str:
 
 def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8-sig", errors="replace") as f:
-        buf = ""
-        for raw in f:
-            s = raw.strip()
-            if not s:
+        for line in f:
+            line = line.strip()
+            if not line:
                 continue
             try:
-                obj = json.loads(s)
-                if isinstance(obj, dict):
-                    yield obj
-                buf = ""
+                yield json.loads(line)
+            except:
                 continue
-            except Exception:
-                pass
-
-            buf += s
-            try:
-                obj = json.loads(buf)
-                if isinstance(obj, dict):
-                    yield obj
-                    buf = ""
-            except Exception:
-                if len(buf) > 5_000_000:
-                    buf = ""
 
 
 def write_jsonl_line(path: Path, obj: Dict[str, Any]) -> None:
@@ -206,237 +153,137 @@ def compute_confidence(top_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =========================
-# CONTEXT BUILD
+# IMPROVED CONTEXT BUILD
 # =========================
 def truncate_text(s: str, max_chars: int) -> str:
     s = (s or "").strip()
     if len(s) <= max_chars:
         return s
-    return s[:max_chars].rstrip() + " ...[TRUNCATED]"
+    # Try to cut at sentence boundary
+    if "." in s[:max_chars]:
+        last_period = s[:max_chars].rfind(".")
+        if last_period > max_chars * 0.7:  # Only if we have a reasonable cutoff
+            return s[:last_period + 1] + " ...[CONTINUED]"
+    return s[:max_chars].rstrip() + "...[CONTINUED]"
 
 
 def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str:
-    parts = []
-    for i, c in enumerate(top_chunks, start=1):
-        txt = truncate_text(c.get("text", ""), per_chunk_chars)
-        parts.append(
-            f"SOURCE {i}:\n"
-            f"title={c.get('title','Unknown')} | author={c.get('author','Unknown')} | year={c.get('publish_year')} | page={c.get('page_number')}\n"
-            f"text={txt}\n"
-        )
-    return "\n".join(parts)
+    """Build context with better formatting for LLM understanding"""
+    if not top_chunks:
+        return "NO CONTEXT AVAILABLE"
+    
+    context_parts = []
+    context_parts.append("=" * 70)
+    context_parts.append("RELEVANT DOCUMENT EXCERPTS ABOUT ABRAHAM LINCOLN:")
+    context_parts.append("=" * 70)
+    
+    for i, chunk in enumerate(top_chunks, 1):
+        text = chunk.get("text", "").strip()
+        if not text:
+            continue
+            
+        # Truncate text intelligently
+        text = truncate_text(text, per_chunk_chars)
+        
+        # Build metadata line
+        meta_info = []
+        if chunk.get('title'):
+            meta_info.append(f"Title: {chunk['title']}")
+        if chunk.get('author'):
+            meta_info.append(f"Author: {chunk['author']}")
+        if chunk.get('publish_year'):
+            meta_info.append(f"Year: {chunk['publish_year']}")
+        
+        meta_str = " | ".join(meta_info) if meta_info else "Historical Document"
+        
+        context_parts.append(f"\n[EXCERPT {i} - {meta_str}]")
+        context_parts.append(f"{text}")
+    
+    context_parts.append("=" * 70)
+    context_parts.append("END OF DOCUMENT EXCERPTS")
+    context_parts.append("=" * 70)
+    
+    return "\n".join(context_parts)
 
 
 # =========================
-# OLLAMA
+# IMPROVED GROQ GENERATION
 # =========================
-def ollama_generate(prompt: str) -> str:
-    url = f"{OLLAMA_URL.rstrip('/')}/api/generate"
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.0,
-            "top_p": 0.7,
-            "num_ctx": int(OLLAMA_NUM_CTX),
-            "num_predict": int(OLLAMA_NUM_PREDICT),
-        },
-    }
-    r = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT_S)
-    r.raise_for_status()
-    return (r.json().get("response") or "").strip()
+def groq_generate(context: str, question: str) -> str:
+    """Generate response using Groq API with strict context enforcement"""
+    if not GROQ_API_KEY:
+        return "Error: Groq API key missing"
+    
+    system_prompt = """You are Abraham Lincoln. You must answer questions based ONLY on the provided document excerpts.
 
+STRICT RULES:
+1. Use ONLY information from the provided excerpts
+2. Do NOT use any outside knowledge about Abraham Lincoln
+3. If the answer is not in the excerpts, say: "Not found in provided documents."
+4. Answer concisely (1-3 sentences)
+5. Do NOT mention that you are using excerpts or context
+6. Answer as if you are Abraham Lincoln himself, based on the historical records provided
+7. If multiple excerpts mention related information, synthesize it into a coherent answer"""
 
-# =========================
-# GROQ (OpenAI-compatible endpoint)
-# =========================
-def _get_groq_key() -> str:
-    k = ""
-    try:
-        k = (st.secrets.get("GROQ_API_KEY") or "").strip()
-    except Exception:
-        k = ""
-    if not k:
-        k = (os.getenv("GROQ_API_KEY") or "").strip()
-    return k
-
-
-def groq_answer(system_prompt: str, context: str, question: str) -> str:
-    """
-    Uses Groq chat completions (OpenAI-compatible).
-    Improves answer quality while enforcing your strict rules.
-    """
-    api_key = _get_groq_key()
-    if not api_key:
-        raise RuntimeError("Missing GROQ_API_KEY")
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    user_content = f"""
-You will answer the QUESTION using ONLY the CONTEXT.
-
-CONTEXT:
+    user_prompt = f"""DOCUMENT EXCERPTS ABOUT ABRAHAM LINCOLN:
 {context}
 
-QUESTION:
-{question}
+QUESTION: {question}
 
-RESPONSE REQUIREMENTS:
-- Output ONLY the final answer (no preface, no bullet labels).
-- 1–3 sentences maximum.
-- Do not mention sources, citations, chunk ids, or the word "context".
-- If the answer is not explicitly stated in CONTEXT, output exactly:
-Not found in provided documents.
-""".strip()
+IMPORTANT: Answer the question using ONLY the information from the document excerpts above.
+If the information is not present in the excerpts, respond with: "Not found in provided documents."
 
+ANSWER AS ABRAHAM LINCOLN:"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    
     payload = {
         "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0.0,
-        "top_p": 0.7,
-        "max_tokens": 220,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 250,
+        "top_p": 0.9,
+        "stream": False
     }
-
-    r = requests.post(url, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
-    r.raise_for_status()
-    data = r.json()
-    txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-
-    # Light output guardrails (generator-only; retrieval unchanged)
-    bad_markers = ["CITATIONS", "SOURCE", "Chunk", "chunk_id", "context", "Context"]
-    for bm in bad_markers:
-        if bm in txt:
-            txt = txt.replace(bm, "").strip()
-
-    if not txt or len(txt) < 3:
-        return "Not found in provided documents."
-
-    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", txt) if s.strip()]
-    if len(sents) > 3:
-        txt = " ".join(sents[:3]).strip()
-
-    txt = txt.replace("ANSWER:", "").replace("Final answer:", "").strip()
-
-    if any(k in txt.lower() for k in ["source 1", "source 2", "chunk id", "chunk_id", "citations"]):
-        return "Not found in provided documents."
-
-    return txt
-
-
-def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[str, str]:
-    """
-    Returns (answer, engine_used)
-    Priority: Groq -> fallback to Ollama
-    """
+    
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
     try:
-        ans = groq_answer(system_prompt, context, question)
-        return ans, "groq"
-    except Exception:
-        prompt = f"""{system_prompt}
-
-CONTEXT:
-{context}
-
-QUESTION:
-{question}
-
-ANSWER:
-"""
-        ans = ollama_generate(prompt)
-        return ans, "ollama"
+        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
+        
+        if response.status_code != 200:
+            return f"API Error {response.status_code}"
+        
+        result = response.json()
+        
+        if "choices" in result and len(result["choices"]) > 0:
+            answer = result["choices"][0]["message"]["content"].strip()
+            
+            # Clean up the answer
+            answer = answer.replace("Based on the excerpts,", "").replace("According to the excerpts,", "")
+            answer = answer.replace("The excerpts indicate that", "").replace("From the excerpts,", "")
+            answer = answer.strip()
+            
+            # Check if answer is valid
+            if not answer or "not found" in answer.lower() or "don't know" in answer.lower():
+                return "Not found in provided documents."
+                
+            return answer
+        else:
+            return "Not found in provided documents."
+            
+    except Exception as e:
+        return f"Error: {str(e)[:100]}"
 
 
 # =========================
-# GOOGLE DRIVE (optional upload)
-# =========================
-def _get_drive_folder_id() -> str:
-    fid = ""
-    try:
-        fid = (st.secrets.get("GDRIVE_FOLDER_ID") or "").strip()
-    except Exception:
-        fid = ""
-    if not fid:
-        fid = (os.getenv("GDRIVE_FOLDER_ID") or "").strip()
-    return fid
-
-
-def _get_drive_service():
-    """
-    Loads service account credentials from:
-    - st.secrets["GDRIVE_SERVICE_ACCOUNT_JSON"] (dict or json string), OR
-    - env var GDRIVE_SERVICE_ACCOUNT_JSON (json string), OR
-    - env var GOOGLE_APPLICATION_CREDENTIALS (path to json file)
-    """
-    if not _GDRIVE_OK:
-        raise RuntimeError("Google Drive libs not installed. Install google-api-python-client google-auth")
-
-    sa_info = None
-
-    # 1) Streamlit secrets (best)
-    try:
-        sa_info = st.secrets.get("GDRIVE_SERVICE_ACCOUNT_JSON")
-    except Exception:
-        sa_info = None
-
-    # 2) Env json
-    if sa_info is None:
-        env_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON")
-        if env_json:
-            try:
-                sa_info = json.loads(env_json)
-            except Exception:
-                sa_info = None
-
-    # 3) GOOGLE_APPLICATION_CREDENTIALS path
-    if sa_info is None:
-        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if cred_path and Path(cred_path).exists():
-            sa_info = json.loads(Path(cred_path).read_text(encoding="utf-8"))
-
-    if sa_info is None:
-        raise RuntimeError("Missing Google Drive service account JSON in secrets/env")
-
-    if isinstance(sa_info, str):
-        sa_info = json.loads(sa_info)
-
-    creds = Credentials.from_service_account_info(sa_info, scopes=GDRIVE_SCOPES)
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    return service
-
-
-def upload_history_to_drive(history_file: Path) -> None:
-    """
-    Uploads (or overwrites) rag_history.jsonl into a Drive folder.
-    Best-effort; does not affect RAG/UI flow.
-    """
-    folder_id = _get_drive_folder_id()
-    if not folder_id:
-        raise RuntimeError("Missing GDRIVE_FOLDER_ID")
-
-    service = _get_drive_service()
-
-    filename = history_file.name
-    q = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
-    res = service.files().list(q=q, fields="files(id,name)", pageSize=10).execute()
-    files = res.get("files") or []
-
-    media = MediaFileUpload(str(history_file), mimetype="application/json", resumable=True)
-
-    if files:
-        file_id = files[0]["id"]
-        service.files().update(fileId=file_id, media_body=media).execute()
-    else:
-        meta = {"name": filename, "parents": [folder_id]}
-        service.files().create(body=meta, media_body=media, fields="id").execute()
-
-
-# =========================
-# LOAD RESOURCES (CACHED)
+# IMPROVED RETRIEVAL
 # =========================
 @st.cache_resource(show_spinner=True)
 def load_rag_resources(project_root: Path):
@@ -446,6 +293,11 @@ def load_rag_resources(project_root: Path):
     index_path = emb_dir / "chunks.faiss"
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
+
+    # Download files if needed
+    download_from_drive(FAISS_FILE_ID, index_path)
+    download_from_drive(META_FILE_ID, meta_path)
+    download_from_drive(CHUNKS_FILE_ID, chunks_path)
 
     if not index_path.exists():
         raise FileNotFoundError(f"FAISS index not found: {index_path}")
@@ -464,13 +316,9 @@ def load_rag_resources(project_root: Path):
         "meta_rows": meta_rows,
         "chunk_text": chunk_text,
         "emb_model": emb_model,
-        "paths": {"index": index_path, "meta": meta_path, "chunks": chunks_path},
     }
 
 
-# =========================
-# SEARCH
-# =========================
 def retrieve_chunks(resources: Dict[str, Any], question: str):
     index = resources["index"]
     meta_rows = resources["meta_rows"]
@@ -478,7 +326,7 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
     emb_model = resources["emb_model"]
 
     q_emb = emb_model.encode([question], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
-    D, I = index.search(q_emb, max(TOP_K, FINAL_K))
+    D, I = index.search(q_emb, TOP_K)
 
     candidates: List[Dict[str, Any]] = []
     for score, idx in zip(D[0], I[0]):
@@ -486,8 +334,9 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
             continue
         m = meta_rows[idx]
         cid = m.get("chunk_id")
-        candidates.append(
-            {
+        txt = chunk_text.get(cid, "")
+        if txt.strip():
+            candidates.append({
                 "score": float(score),
                 "chunk_id": cid,
                 "doc_id": m.get("doc_id"),
@@ -498,413 +347,250 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
                 "scan_source": m.get("scan_source"),
                 "source_url": m.get("source_url"),
                 "page_number": m.get("page_number"),
-                "text": chunk_text.get(cid, ""),
-            }
-        )
+                "text": txt,
+            })
 
-    filtered = [c for c in candidates if isinstance(c.get("text"), str) and c["text"].strip()]
-    return filtered[:FINAL_K], candidates
+    # Sort by score and take top FINAL_K
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Filter out very low scores
+    if candidates:
+        top_score = candidates[0]["score"]
+        filtered = [c for c in candidates if c["score"] >= top_score - 0.3][:FINAL_K]
+    else:
+        filtered = []
+    
+    return filtered, candidates
 
 
 # =========================
-# UI
+# UI (SAME AS BEFORE)
 # =========================
 def inject_css():
-    st.markdown(
-        """
-        <style>
-          .stApp { background: #2d2a25; }
-          header[data-testid="stHeader"] { background: transparent; }
-          footer { visibility: hidden; }
-
-          .lincoln-top {
-            background: linear-gradient(180deg, #3b6b8a 0%, #2f556f 100%);
-            border: 1px solid rgba(0,0,0,0.35);
-            border-radius: 10px;
-            padding: 14px 18px;
-            margin: 6px 0 12px 0;
-            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
-            color: #f5e8cf;
-            text-align:center;
-            font-family: Georgia, 'Times New Roman', serif;
-            font-weight: 900;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            font-size: 26px;
-          }
-
-          /* Style ONLY the first main two-column block */
-          div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stVerticalBlock"]{
-            background: rgba(80,55,30,0.35);
-            border: 1px solid rgba(0,0,0,0.35);
-            border-radius: 10px;
-            padding: 14px;
-            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
-          }
-          div[data-testid="stHorizontalBlock"] > div:nth-child(2) div[data-testid="stVerticalBlock"]{
-            background: linear-gradient(180deg, rgba(246,235,212,0.96) 0%, rgba(235,217,185,0.96) 100%);
-            border: 1px solid rgba(0,0,0,0.35);
-            border-radius: 10px;
-            padding: 16px;
-            box-shadow: 0 10px 22px rgba(0,0,0,0.25);
-          }
-
-          .leftTitle {
-            font-family: Georgia, 'Times New Roman', serif;
-            font-size: 22px;
-            font-weight: 900;
-            color: #f3e7cf;
-            margin-top: 12px;
-          }
-          .leftSub {
-            color: rgba(243,231,207,0.85);
-            font-size: 13px;
-            margin-top: 2px;
-            margin-bottom: 6px;
-          }
-
-          /* Chat bubbles (text black) */
-          .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
-          .bubble { color:#000 !important; }
-
-          .avatar {
-            width: 34px; height: 34px; border-radius: 50%;
-            background: rgba(0,0,0,0.12);
-            border: 1px solid rgba(0,0,0,0.18);
-            display:flex; align-items:center; justify-content:center;
-            font-family: Georgia, serif; font-weight: 900; color: rgba(0,0,0,0.65);
-            flex: 0 0 auto;
-          }
-          .bubble {
-            border-radius: 12px;
-            padding: 10px 12px;
-            border: 1px solid rgba(0,0,0,0.18);
-            box-shadow: 0 6px 12px rgba(0,0,0,0.12);
-            line-height: 1.35;
-            max-width: 92%;
-            word-wrap: break-word;
-          }
-          .assistant { background: rgba(255,255,255,0.65); }
-          .user { background: rgba(220,235,245,0.70); margin-left:auto; }
-
-          .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
-          .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
-
-          /* Send button */
-          .stButton > button {
-            background: #0f172a;
-            color: #ffffff;
-            border: 1px solid rgba(0,0,0,0.35);
-            border-radius: 10px;
-            padding: 10px 16px;
-            font-weight: 800;
-          }
-          .stButton > button:hover { background: #111c35; color: #fff; }
-
-          /* Remove extra boxes around input */
-          div[data-testid="stForm"], div[data-testid="stForm"] > div {
-            background: transparent !important;
-            border: none !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            box-shadow: none !important;
-          }
-          div[data-testid="stHorizontalBlock"] div[data-testid="column"] {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-          }
-
-          /* Input style (single box) */
-          div[data-testid="stTextInput"] input {
-            width: 100% !important;
-            background: rgba(255,255,255,0.65) !important;
-            border: 1px solid rgba(0,0,0,0.25) !important;
-            border-radius: 10px !important;
-            padding: 14px 14px !important;
-            color: rgba(0,0,0,0.75) !important;
-            box-shadow: none !important;
-          }
-          div[data-testid="stTextInput"] input::placeholder { color: rgba(0,0,0,0.45) !important; }
-
-          /* Typing animation dots */
-          .typing {
-            display: inline-flex;
-            gap: 6px;
-            align-items: center;
-            padding: 10px 12px;
-            border-radius: 12px;
-            border: 1px solid rgba(0,0,0,0.18);
-            box-shadow: 0 6px 12px rgba(0,0,0,0.12);
-            background: rgba(255,255,255,0.65);
-          }
-          .dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: rgba(0,0,0,0.45);
-            animation: blink 1.2s infinite;
-          }
-          .dot:nth-child(2){ animation-delay: 0.2s; }
-          .dot:nth-child(3){ animation-delay: 0.4s; }
-
-          @keyframes blink {
-            0%, 80%, 100% { opacity: 0.25; transform: translateY(0px); }
-            40% { opacity: 1; transform: translateY(-2px); }
-          }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_topbar():
-    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT</div>', unsafe_allow_html=True)
-
-
-def show_portrait():
-    p = Path(PORTRAIT_PATH)
-    if p.exists():
-        st.image(str(p), use_container_width=True)
-    else:
-        st.warning("Portrait not found. Check PORTRAIT_PATH.")
-
-
-def render_chat_bubble(role: str, text: str, confidence: Optional[int] = None):
-    if role == "user":
-        st.markdown(
-            f'<div class="row" style="justify-content:flex-end;">'
-            f'  <div class="bubble user"><b>You</b>&nbsp;&nbsp; {text}</div>'
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        conf_html = ""
-        if confidence is not None:
-            conf_html = f'<div class="metaLine">Confidence: <b>{confidence}/100</b></div>'
-        st.markdown(
-            f'<div class="row">'
-            f'  <div class="avatar">AL</div>'
-            f'  <div>'
-            f'    <div class="bubble assistant">{text}</div>'
-            f'    {conf_html}'
-            f'  </div>'
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-
-def render_typing_indicator():
-    st.markdown(
-        """
-        <div class="row">
-          <div class="avatar">AL</div>
-          <div class="typing" aria-label="typing">
-            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def autoscroll_inside_chat():
-    st.markdown(
-        """
-        <script>
-          (function() {
-            const root = window.parent.document;
-            const el = root.getElementById('chat-scroll-anchor');
-            if (el) el.scrollIntoView({behavior:'smooth', block:'end'});
-          })();
-        </script>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("""
+    <style>
+    .stApp { background: #2d2a25; }
+    .lincoln-top {
+        background: linear-gradient(180deg, #3b6b8a 0%, #2f556f 100%);
+        border-radius: 10px; padding: 14px 18px; margin: 6px 0 12px 0;
+        color: #f5e8cf; text-align:center; font-family: Georgia; 
+        font-weight: 900; letter-spacing: 1px; text-transform: uppercase; font-size: 26px;
+    }
+    .leftTitle { font-family: Georgia; font-size: 22px; font-weight: 900; color: #f3e7cf; margin-top: 12px; }
+    .leftSub { color: rgba(243,231,207,0.85); font-size: 13px; margin-top: 2px; margin-bottom: 6px; }
+    .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
+    .avatar { width: 34px; height: 34px; border-radius: 50%; background: rgba(0,0,0,0.12); 
+              border: 1px solid rgba(0,0,0,0.18); display:flex; align-items:center; 
+              justify-content:center; font-family: Georgia; font-weight: 900; color: rgba(0,0,0,0.65); }
+    .bubble { border-radius: 12px; padding: 10px 12px; border: 1px solid rgba(0,0,0,0.18);
+              box-shadow: 0 6px 12px rgba(0,0,0,0.12); line-height: 1.35; max-width: 92%; word-wrap: break-word; }
+    .assistant { background: rgba(255,255,255,0.65); }
+    .user { background: rgba(220,235,245,0.70); margin-left:auto; }
+    .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
+    .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
+    .stButton > button { background: #0f172a; color: #ffffff; border-radius: 10px; padding: 10px 16px; font-weight: 800; }
+    .stButton > button:hover { background: #111c35; }
+    
+    /* Debug panel */
+    .debug-panel {
+        background: rgba(0,0,0,0.05);
+        border: 1px solid rgba(0,0,0,0.1);
+        border-radius: 8px;
+        padding: 12px;
+        margin: 10px 0;
+        font-size: 12px;
+    }
+    .debug-title {
+        font-weight: bold;
+        color: #666;
+        margin-bottom: 5px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def main():
     st.set_page_config(page_title="The Abraham Lincoln Chatbot", layout="wide")
     inject_css()
-    render_topbar()
-
+    
+    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ)</div>', unsafe_allow_html=True)
+    
+    if not GROQ_API_KEY:
+        st.error("❌ Groq API key missing! Add to secrets.toml")
+        st.stop()
+    
     script_dir = Path(__file__).resolve().parent
     project_root = find_project_root(script_dir)
     history_path = project_root / "rag_history" / "rag_history.jsonl"
-
+    
     try:
         resources = load_rag_resources(project_root)
     except Exception as e:
         st.error(str(e))
         st.stop()
-
-    # state
+    
+    # State
     if "chat" not in st.session_state:
         st.session_state.chat = []
     if "show_context" not in st.session_state:
         st.session_state.show_context = False
+    if "show_debug" not in st.session_state:
+        st.session_state.show_debug = False
     if "is_typing" not in st.session_state:
         st.session_state.is_typing = False
     if "pending_user_q" not in st.session_state:
         st.session_state.pending_user_q = ""
-
+    
     left, right = st.columns([1, 2.2], gap="large")
-
+    
     with left:
-        show_portrait()
+        p = Path(PORTRAIT_PATH)
+        if p.exists():
+            st.image(str(p), use_container_width=True)
+        else:
+            st.warning("Portrait not found")
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
-
-        groq_present = bool(_get_groq_key())
-        st.caption(f"Answering engine: {'Groq (primary)' if groq_present else 'Ollama (fallback)'}")
-
+        st.markdown("---")
+        st.markdown("**Powered by:**")
+        st.markdown("• Groq API")
+        st.markdown("• FAISS Vector Search")
+        st.markdown("• Google Drive")
+        
+        st.session_state.show_debug = st.checkbox("Show Debug Info", value=False)
+    
     with right:
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
-
         with chat_area:
             if not st.session_state.chat:
-                render_chat_bubble("assistant", "Hello there! I am Abraham Lincoln. How can I assist you today?")
-
+                st.markdown("""
+                <div class="row">
+                  <div class="avatar">AL</div>
+                  <div class="bubble assistant">Hello there! I am Abraham Lincoln. How can I assist you today?</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
             for msg in st.session_state.chat[-200:]:
                 if msg["role"] == "user":
-                    render_chat_bubble("user", msg["text"])
+                    st.markdown(f"""
+                    <div class="row" style="justify-content:flex-end;">
+                      <div class="bubble user"><b>You</b>&nbsp;&nbsp; {msg['text']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
-                    render_chat_bubble("assistant", msg["text"], confidence=msg.get("confidence"))
-
+                    conf_html = f'<div class="metaLine">Confidence: <b>{msg.get("confidence", 0)}/100</b></div>' if msg.get("confidence") is not None else ""
+                    st.markdown(f"""
+                    <div class="row">
+                      <div class="avatar">AL</div>
+                      <div>
+                        <div class="bubble assistant">{msg['text']}</div>
+                        {conf_html}
+                      </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
             if st.session_state.is_typing:
-                render_typing_indicator()
-
+                st.markdown("""
+                <div class="row">
+                  <div class="avatar">AL</div>
+                  <div class="typing">
+                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+                  </div>
+                </div>
+                <style>
+                .typing { display: inline-flex; gap: 6px; align-items: center; padding: 10px 12px;
+                          border-radius: 12px; border: 1px solid rgba(0,0,0,0.18); background: rgba(255,255,255,0.65); }
+                .dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(0,0,0,0.45); animation: blink 1.2s infinite; }
+                .dot:nth-child(2){ animation-delay: 0.2s; } .dot:nth-child(3){ animation-delay: 0.4s; }
+                @keyframes blink { 0%,80%,100% { opacity: 0.25; } 40% { opacity: 1; } }
+                </style>
+                """, unsafe_allow_html=True)
+            
             st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
-
-        autoscroll_inside_chat()
-
+        
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
-        st.session_state.show_context = st.checkbox(
-            "Show retrieved context (inside Sources)",
-            value=st.session_state.show_context,
-        )
-
+        st.session_state.show_context = st.checkbox("Show retrieved context", value=st.session_state.show_context)
+        
         with st.form("chat_form", clear_on_submit=True):
             in_col, send_col = st.columns([5, 1])
             with in_col:
-                question = st.text_input(
-                    "Type your message...",
-                    value="",
-                    label_visibility="collapsed",
-                    placeholder="Type your message...",
-                )
+                question = st.text_input("Type your message...", label_visibility="collapsed", placeholder="Type your message...")
             with send_col:
                 send = st.form_submit_button("Send", use_container_width=True)
-
-        if send:
-            user_q = (question or "").strip()
-            if not user_q:
-                st.warning("Please type a message.")
-                st.stop()
-
-            st.session_state.chat.append({"role": "user", "text": user_q})
-            st.session_state.pending_user_q = user_q
+        
+        if send and question.strip():
+            st.session_state.chat.append({"role": "user", "text": question.strip()})
+            st.session_state.pending_user_q = question.strip()
             st.session_state.is_typing = True
             st.rerun()
-
-    # Generation step (same RAG functionality)
+    
+    # Generation
     if st.session_state.is_typing:
-        user_q = (st.session_state.pending_user_q or "").strip()
-        if not user_q:
-            st.session_state.is_typing = False
-            st.stop()
-
-        with st.spinner("Retrieving relevant chunks..."):
-            top_chunks, _ = retrieve_chunks(resources, user_q)
-
+        user_q = st.session_state.pending_user_q.strip()
+        
+        with st.spinner("Searching documents..."):
+            top_chunks, all_candidates = retrieve_chunks(resources, user_q)
+        
         if not top_chunks:
             answer = "Not found in provided documents."
             st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": 0, "sources": []})
-            write_jsonl_line(
-                history_path,
-                {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []},
-            )
+            write_jsonl_line(history_path, {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0})
             st.session_state.is_typing = False
             st.session_state.pending_user_q = ""
             st.rerun()
-
+        
         conf = compute_confidence(top_chunks)
-        context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
-
-        with st.spinner("Generating answer (Groq preferred, Ollama fallback)..."):
-            try:
-                answer, engine_used = generate_answer(SYSTEM_PROMPT, context, user_q)
-            except Exception as e:
-                answer = f"Generation error: {type(e).__name__}: {str(e)[:300]}"
-                engine_used = "error"
-                conf = {"confidence": 0}
-
-        st.session_state.chat.append(
-            {
-                "role": "assistant",
-                "text": answer,
-                "confidence": conf.get("confidence", 0),
-                "sources": top_chunks,
-                "engine": engine_used,
-            }
-        )
-
-        write_jsonl_line(
-            history_path,
-            {
-                "ts": utc_now_iso(),
-                "question": user_q,
-                "answer": answer,
-                "engine": engine_used,
-                "confidence": conf.get("confidence", 0),
-                "confidence_details": conf,
-                "sources": [
-                    {
-                        "score": c.get("score"),
-                        "chunk_id": c.get("chunk_id"),
-                        "doc_id": c.get("doc_id"),
-                        "title": c.get("title"),
-                        "author": c.get("author"),
-                        "publish_year": c.get("publish_year"),
-                        "publisher": c.get("publisher"),
-                        "scan_source": c.get("scan_source"),
-                        "source_url": c.get("source_url"),
-                        "page_number": c.get("page_number"),
-                    }
-                    for c in top_chunks
-                ],
-            },
-        )
-
-        # Optional: upload history to Drive (best-effort; no UI/flow change)
-        if UPLOAD_HISTORY_TO_DRIVE:
-            try:
-                upload_history_to_drive(history_path)
-            except Exception:
-                pass
-
+        context = build_context(top_chunks, PER_CHUNK_CHARS)
+        
+        # Show debug info if enabled
+        if st.session_state.show_debug:
+            with st.expander("Debug Information", expanded=True):
+                st.write(f"**Question:** {user_q}")
+                st.write(f"**Top {len(top_chunks)} chunks retrieved (scores):**")
+                for i, c in enumerate(top_chunks[:5], 1):
+                    st.write(f"{i}. Score: {c['score']:.4f} | Title: {c.get('title', 'Unknown')}")
+                st.write(f"**Context length:** {len(context)} characters")
+                st.write("**First 500 chars of context:**")
+                st.text(context[:500] + "...")
+        
+        with st.spinner("Generating answer..."):
+            answer = groq_generate(context, user_q)
+        
+        st.session_state.chat.append({
+            "role": "assistant", 
+            "text": answer, 
+            "confidence": conf.get("confidence", 0), 
+            "sources": top_chunks
+        })
+        
+        write_jsonl_line(history_path, {
+            "ts": utc_now_iso(),
+            "question": user_q,
+            "answer": answer,
+            "confidence": conf.get("confidence", 0),
+            "confidence_details": conf,
+            "sources": [{
+                "score": c.get("score"),
+                "chunk_id": c.get("chunk_id"),
+                "title": c.get("title"),
+                "author": c.get("author"),
+                "text_preview": c.get("text")[:200] + "..." if len(c.get("text", "")) > 200 else c.get("text", "")
+            } for c in top_chunks]
+        })
+        
         st.session_state.is_typing = False
         st.session_state.pending_user_q = ""
         st.rerun()
-
-    # SOURCES (unchanged)
-    last = None
-    for m in reversed(st.session_state.chat):
-        if m.get("role") == "assistant" and m.get("sources"):
-            last = m
-            break
-
+    
+    # Sources
+    last = next((m for m in reversed(st.session_state.chat) if m.get("role") == "assistant" and m.get("sources")), None)
     if last and last.get("sources"):
-        st.markdown("### 📌 Sources (real)")
-        for i, c in enumerate(last["sources"], start=1):
-            with st.expander(f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"):
-                st.write(f"**Title:** {c.get('title')}")
-                st.write(f"**Author:** {c.get('author')}")
-                st.write(f"**Year:** {c.get('publish_year')}")
-                st.write(f"**Publisher:** {c.get('publisher')}")
-                st.write(f"**Chunk ID:** `{c.get('chunk_id')}`")
-                st.write(f"**Source URL:** {c.get('source_url')}")
+        st.markdown("### 📌 Sources")
+        for i, c in enumerate(last["sources"], 1):
+            with st.expander(f"{i}. Score: {c['score']:.4f} | {c.get('title', 'Unknown')}"):
+                st.write(f"**Author:** {c.get('author', 'Unknown')}")
+                st.write(f"**Year:** {c.get('publish_year', 'Unknown')}")
+                st.write(f"**Source:** {c.get('scan_source', 'Unknown')}")
                 if st.session_state.show_context:
                     st.divider()
                     st.write(c.get("text", ""))
