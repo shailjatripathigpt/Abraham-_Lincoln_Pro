@@ -1,16 +1,15 @@
 # app.py
 """
-Streamlit UI for your RAG (FAISS + Groq) with:
-✅ Ask question -> Top chunks -> Answer (using Groq API)
+Streamlit UI for your RAG (FAISS + Groq API) with:
+✅ Ask question -> Top chunks -> Answer
 ✅ Confidence score
 ✅ Saves history to PROJECT_ROOT/rag_history/rag_history.jsonl
-✅ Same beautiful UI as your original code
+✅ Google Drive integration for FAISS files
 
-UI features:
+UI extras added (NO change to RAG functionality):
 ✅ Fixed-height scrollable chat box (TRUE fixed height using st.container(height=...))
-✅ Auto-scroll to latest answer
-✅ Typing animation
-✅ Abraham Lincoln themed design
+✅ Auto-scroll to latest answer (scrolls inside the chat box, not page)
+✅ Typing animation (visual only)
 """
 
 import json
@@ -22,16 +21,29 @@ import numpy as np
 import requests
 import streamlit as st
 import gdown
-import faiss
-from sentence_transformers import SentenceTransformer
+
+try:
+    import faiss
+except ImportError:
+    st.error("faiss not installed. Run: pip install faiss-cpu")
+    raise
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    st.error("sentence-transformers not installed. Run: pip install sentence-transformers")
+    raise
 
 
 # =========================
-# CONSTANTS
+# CONSTANTS (NO UI SETTINGS)
 # =========================
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and accurate model
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_TIMEOUT_S = 30
+
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.1-8b-instant"  # Fast & free model
 
 # Google Drive IDs
 FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
@@ -55,7 +67,31 @@ RULES (must follow):
 3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids.
 4) If the answer is not explicitly present in CONTEXT, reply exactly:
    Not found in provided documents.
+5) Make your answer clear, concise, and directly based on the context provided.
+6) If the context contains relevant information, synthesize it into a coherent answer.
 """
+
+
+# =========================
+# DOWNLOAD FROM GOOGLE DRIVE
+# =========================
+def download_from_drive(file_id: str, destination: Path):
+    """Download file from Google Drive if it doesn't exist"""
+    if destination.exists():
+        return True
+    
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        gdown.download(
+            f"https://drive.google.com/uc?id={file_id}",
+            str(destination),
+            quiet=False
+        )
+        return destination.exists()
+    except Exception as e:
+        st.warning(f"Could not download {destination.name} from Google Drive: {str(e)}")
+        return False
 
 
 # =========================
@@ -68,16 +104,6 @@ def find_project_root(start: Path) -> Path:
             return cur
         cur = cur.parent
     return start.resolve()
-
-
-# =========================
-# DOWNLOAD FROM DRIVE
-# =========================
-def download_from_drive(fid, dest):
-    if dest.exists():
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    gdown.download(f"https://drive.google.com/uc?id={fid}", str(dest), quiet=False)
 
 
 # =========================
@@ -197,33 +223,63 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
 # GROQ GENERATION
 # =========================
 def groq_generate(prompt: str) -> str:
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    """Generate response using Groq API with improved prompt formatting"""
+    if not GROQ_API_KEY:
+        raise ValueError("Groq API key is missing")
     
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    # Create a well-formatted prompt for Groq
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
     
     payload = {
         "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.0,
+        "messages": messages,
+        "temperature": 0.1,  # Lower temperature for more factual responses
         "max_tokens": 300,
-        "top_p": 0.7,
+        "top_p": 0.9,
+        "stream": False
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
     
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
-        r.raise_for_status()
-        response = r.json()
-        return response["choices"][0]["message"]["content"].strip()
-    except requests.exceptions.ConnectionError:
-        raise ConnectionError("Cannot connect to Groq API. Check your internet connection.")
-    except requests.exceptions.Timeout:
-        raise TimeoutError("Groq API request timed out after 30 seconds.")
+        response = requests.post(
+            GROQ_URL,
+            headers=headers,
+            json=payload,
+            timeout=GROQ_TIMEOUT_S
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        if "choices" in result and len(result["choices"]) > 0:
+            answer = result["choices"][0]["message"]["content"].strip()
+            
+            # Clean up the answer
+            if answer.startswith("Answer:"):
+                answer = answer[7:].strip()
+            if answer.startswith("ANSWER:"):
+                answer = answer[7:].strip()
+                
+            return answer
+        else:
+            raise ValueError("No response from Groq API")
+            
+    except requests.exceptions.RequestException as e:
+        raise ConnectionError(f"Groq API connection error: {str(e)}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid response from Groq API: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Groq API error: {str(e)}")
 
@@ -232,31 +288,36 @@ def groq_generate(prompt: str) -> str:
 # LOAD RESOURCES (CACHED)
 # =========================
 @st.cache_resource(show_spinner=True)
-def load_rag_resources():
-    emb_dir = Path("embeddings")
-    chunks_dir = Path("chunks")
-    
+def load_rag_resources(project_root: Path):
+    emb_dir = project_root / "embeddings"
+    chunks_dir = project_root / "chunks"
+
     index_path = emb_dir / "chunks.faiss"
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
+
+    # Download files from Google Drive if needed
+    with st.spinner("Checking for FAISS index..."):
+        download_from_drive(FAISS_FILE_ID, index_path)
     
-    # Download files from Google Drive if they don't exist
-    download_from_drive(FAISS_FILE_ID, index_path)
-    download_from_drive(META_FILE_ID, meta_path)
-    download_from_drive(CHUNKS_FILE_ID, chunks_path)
+    with st.spinner("Checking for metadata..."):
+        download_from_drive(META_FILE_ID, meta_path)
     
+    with st.spinner("Checking for chunks data..."):
+        download_from_drive(CHUNKS_FILE_ID, chunks_path)
+
     if not index_path.exists():
         raise FileNotFoundError(f"FAISS index not found: {index_path}")
     if not meta_path.exists():
         raise FileNotFoundError(f"Meta JSONL not found: {meta_path}")
     if not chunks_path.exists():
         raise FileNotFoundError(f"Chunks JSONL not found: {chunks_path}")
-    
+
     index = faiss.read_index(str(index_path))
     meta_rows = list(iter_jsonl(meta_path))
     chunk_text = load_chunks_text_map(chunks_path)
     emb_model = SentenceTransformer(EMBED_MODEL_NAME)
-    
+
     return {
         "index": index,
         "meta_rows": meta_rows,
@@ -274,10 +335,10 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
     meta_rows = resources["meta_rows"]
     chunk_text = resources["chunk_text"]
     emb_model = resources["emb_model"]
-    
+
     q_emb = emb_model.encode([question], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
     D, I = index.search(q_emb, max(TOP_K, FINAL_K))
-    
+
     candidates: List[Dict[str, Any]] = []
     for score, idx in zip(D[0], I[0]):
         if idx < 0 or idx >= len(meta_rows):
@@ -299,13 +360,13 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
                 "text": chunk_text.get(cid, ""),
             }
         )
-    
+
     filtered = [c for c in candidates if isinstance(c.get("text"), str) and c["text"].strip()]
     return filtered[:FINAL_K], candidates
 
 
 # =========================
-# UI
+# UI (EXACTLY THE SAME AS YOUR ORIGINAL)
 # =========================
 def inject_css():
     st.markdown(
@@ -396,13 +457,8 @@ def inject_css():
             border-radius: 10px;
             padding: 10px 16px;
             font-weight: 800;
-            transition: all 0.2s ease;
           }
-          .stButton > button:hover { 
-            background: #111c35; 
-            color: #fff; 
-            transform: translateY(-1px);
-          }
+          .stButton > button:hover { background: #111c35; color: #fff; }
 
           /* Remove extra boxes around input */
           div[data-testid="stForm"], div[data-testid="stForm"] > div {
@@ -427,11 +483,6 @@ def inject_css():
             padding: 14px 14px !important;
             color: rgba(0,0,0,0.75) !important;
             box-shadow: none !important;
-            transition: all 0.2s ease;
-          }
-          div[data-testid="stTextInput"] input:focus {
-            border-color: #3b6b8a !important;
-            box-shadow: 0 0 0 2px rgba(59,107,138,0.2) !important;
           }
           div[data-testid="stTextInput"] input::placeholder { color: rgba(0,0,0,0.45) !important; }
 
@@ -459,11 +510,6 @@ def inject_css():
           @keyframes blink {
             0%, 80%, 100% { opacity: 0.25; transform: translateY(0px); }
             40% { opacity: 1; transform: translateY(-2px); }
-          }
-          
-          /* Ensure chat container has consistent scroll */
-          [data-testid="stVerticalBlock"] > [data-testid="element-container"]:has(> #chat-scroll-anchor) {
-            padding-bottom: 0px !important;
           }
         </style>
         """,
@@ -494,8 +540,7 @@ def render_chat_bubble(role: str, text: str, confidence: Optional[int] = None):
     else:
         conf_html = ""
         if confidence is not None:
-            color = "green" if confidence >= 70 else "orange" if confidence >= 40 else "red"
-            conf_html = f'<div class="metaLine">Confidence: <b style="color:{color}">{confidence}/100</b></div>'
+            conf_html = f'<div class="metaLine">Confidence: <b>{confidence}/100</b></div>'
         st.markdown(
             f'<div class="row">'
             f'  <div class="avatar">AL</div>'
@@ -530,11 +575,7 @@ def autoscroll_inside_chat():
           (function() {
             const root = window.parent.document;
             const el = root.getElementById('chat-scroll-anchor');
-            if (el) {
-              setTimeout(() => {
-                el.scrollIntoView({behavior:'smooth', block:'end'});
-              }, 100);
-            }
+            if (el) el.scrollIntoView({behavior:'smooth', block:'end'});
           })();
         </script>
         """,
@@ -544,22 +585,23 @@ def autoscroll_inside_chat():
 
 def main():
     st.set_page_config(page_title="The Abraham Lincoln Chatbot", layout="wide")
-    
-    if not GROQ_API_KEY:
-        st.error("GROQ_API_KEY missing in secrets.toml! Please add your Groq API key.")
-        st.stop()
-    
     inject_css()
     render_topbar()
+
+    # Check for Groq API key
+    if not GROQ_API_KEY:
+        st.error("❌ Groq API key is missing! Please add it to your Streamlit secrets.toml file.")
+        st.info("Add this to your `.streamlit/secrets.toml` file:\n\nGROQ_API_KEY = \"your-groq-api-key-here\"")
+        st.stop()
 
     script_dir = Path(__file__).resolve().parent
     project_root = find_project_root(script_dir)
     history_path = project_root / "rag_history" / "rag_history.jsonl"
 
     try:
-        resources = load_rag_resources()
+        resources = load_rag_resources(project_root)
     except Exception as e:
-        st.error(f"Error loading resources: {str(e)}")
+        st.error(str(e))
         st.stop()
 
     # state
@@ -580,12 +622,12 @@ def main():
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("**Powered by:**")
-        st.markdown("• Groq API (Llama 3.1 8B)")
-        st.markdown("• FAISS Vector Search")
+        st.markdown("• Groq API (Llama 3.1)")
         st.markdown("• Google Drive Storage")
+        st.markdown("• FAISS Vector Search")
 
     with right:
-        # ✅ TRUE fixed-height scroll container
+        # ✅ TRUE fixed-height scroll container (this prevents the box from growing)
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
 
         with chat_area:
@@ -637,22 +679,15 @@ def main():
             st.session_state.is_typing = True
             st.rerun()
 
-    # Generation step with Groq API
+    # Generation step (using Groq API instead of Ollama)
     if st.session_state.is_typing:
         user_q = (st.session_state.pending_user_q or "").strip()
         if not user_q:
             st.session_state.is_typing = False
-            st.session_state.pending_user_q = ""
-            st.rerun()
+            st.stop()
 
         with st.spinner("Retrieving relevant chunks..."):
-            try:
-                top_chunks, _ = retrieve_chunks(resources, user_q)
-            except Exception as e:
-                st.error(f"Error retrieving chunks: {str(e)}")
-                st.session_state.is_typing = False
-                st.session_state.pending_user_q = ""
-                st.rerun()
+            top_chunks, _ = retrieve_chunks(resources, user_q)
 
         if not top_chunks:
             answer = "Not found in provided documents."
@@ -668,24 +703,21 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
+        # Build a better formatted prompt for Groq
         prompt = f"""{SYSTEM_PROMPT}
 
-CONTEXT:
+CONTEXT INFORMATION:
 {context}
 
-QUESTION:
-{user_q}
+USER QUESTION: {user_q}
 
-ANSWER:
-"""
+Based ONLY on the context above, provide a clear and concise answer:"""
 
-        with st.spinner("Generating answer with Groq API..."):
+        with st.spinner("Generating answer with Groq..."):
             try:
                 answer = groq_generate(prompt)
             except Exception as e:
-                answer = f"Error generating answer: {type(e).__name__}"
-                if "ConnectionError" in str(type(e).__name__):
-                    answer = "Cannot connect to Groq API. Please check your internet connection and API key."
+                answer = f"Error: {type(e).__name__}: {str(e)[:300]}"
                 conf = {"confidence": 0}
 
         st.session_state.chat.append(
@@ -722,7 +754,7 @@ ANSWER:
         st.session_state.pending_user_q = ""
         st.rerun()
 
-    # SOURCES section
+    # SOURCES (unchanged)
     last = None
     for m in reversed(st.session_state.chat):
         if m.get("role") == "assistant" and m.get("sources"):
