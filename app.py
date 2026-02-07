@@ -39,7 +39,7 @@ except ImportError:
 # CONSTANTS (NO UI SETTINGS)
 # =========================
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.1-8b-instant"  # Fast and accurate model
+GROQ_MODEL = "llama-3.1-8b-instant"  # Try this model first
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_TIMEOUT_S = 30
 
@@ -218,40 +218,39 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
 
 
 # =========================
-# GROQ GENERATION - FIXED TO MATCH PHI3:MINI FORMAT
+# GROQ GENERATION - FIXED TO WORK LIKE PHI3:MINI
 # =========================
 def groq_generate(prompt: str) -> str:
-    """Generate response using Groq API - using same prompt format as phi3:mini"""
+    """Generate response using Groq API - working exactly like phi3:mini"""
     if not GROQ_API_KEY:
         raise ValueError("Groq API key is missing")
     
-    # Use the EXACT same prompt format that worked with phi3:mini
-    # The prompt already contains the system instructions at the beginning
-    # So we just need to send it as a user message
+    # IMPORTANT: We need to structure the prompt exactly like phi3:mini expects
+    # phi3:mini gets: SYSTEM_PROMPT + CONTEXT + QUESTION + "ANSWER:"
+    # So we need to send the EXACT same structure to Groq
     
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Use chat completion with a single user message containing everything
+    # This mimics how phi3:mini receives the prompt
     messages = [
         {
-            "role": "system", 
-            "content": "You are a helpful assistant that answers questions based on the provided context."
-        },
-        {
-            "role": "user", 
-            "content": prompt
+            "role": "user",
+            "content": prompt  # The FULL prompt including system instructions
         }
     ]
     
     payload = {
         "model": GROQ_MODEL,
         "messages": messages,
-        "temperature": 0.0,  # EXACTLY same as phi3:mini (0.0 for deterministic)
+        "temperature": 0.0,  # Same as phi3:mini
         "max_tokens": 300,
-        "top_p": 0.7,  # EXACTLY same as phi3:mini
-        "stream": False
-    }
-    
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+        "top_p": 0.7,  # Same as phi3:mini
+        "stream": False,
+        "stop": None  # No stop tokens
     }
     
     try:
@@ -261,26 +260,37 @@ def groq_generate(prompt: str) -> str:
             json=payload,
             timeout=GROQ_TIMEOUT_S
         )
-        response.raise_for_status()
         
+        # Debug: Print the response status
+        if response.status_code != 200:
+            st.error(f"Groq API error: {response.status_code} - {response.text}")
+            return f"API Error: {response.status_code}"
+        
+        response.raise_for_status()
         result = response.json()
+        
         if "choices" in result and len(result["choices"]) > 0:
             answer = result["choices"][0]["message"]["content"].strip()
             
-            # Remove any prefix if present
+            # Clean up: remove any "Answer:" prefix if present
             if answer.lower().startswith("answer:"):
                 answer = answer[7:].strip()
+            elif answer.lower().startswith("answer: "):
+                answer = answer[8:].strip()
                 
             return answer
         else:
-            return "Error: No response from Groq API"
+            return "No response generated"
             
     except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"Groq API connection error: {str(e)}")
+        st.error(f"Groq connection error: {str(e)}")
+        return f"Connection error: {str(e)}"
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid response from Groq API: {str(e)}")
+        st.error(f"Invalid JSON response: {str(e)}")
+        return "Invalid response from API"
     except Exception as e:
-        raise RuntimeError(f"Groq API error: {str(e)}")
+        st.error(f"Unexpected error: {str(e)}")
+        return f"Error: {str(e)}"
 
 
 # =========================
@@ -297,13 +307,16 @@ def load_rag_resources(project_root: Path):
 
     # Download files from Google Drive if needed
     with st.spinner("Checking for FAISS index..."):
-        download_from_drive(FAISS_FILE_ID, index_path)
+        if not index_path.exists():
+            download_from_drive(FAISS_FILE_ID, index_path)
     
     with st.spinner("Checking for metadata..."):
-        download_from_drive(META_FILE_ID, meta_path)
+        if not meta_path.exists():
+            download_from_drive(META_FILE_ID, meta_path)
     
     with st.spinner("Checking for chunks data..."):
-        download_from_drive(CHUNKS_FILE_ID, chunks_path)
+        if not chunks_path.exists():
+            download_from_drive(CHUNKS_FILE_ID, chunks_path)
 
     if not index_path.exists():
         raise FileNotFoundError(f"FAISS index not found: {index_path}")
@@ -327,7 +340,7 @@ def load_rag_resources(project_root: Path):
 
 
 # =========================
-# SEARCH
+# SEARCH (EXACTLY THE SAME)
 # =========================
 def retrieve_chunks(resources: Dict[str, Any], question: str):
     index = resources["index"]
@@ -678,7 +691,7 @@ def main():
             st.session_state.is_typing = True
             st.rerun()
 
-    # Generation step (using Groq API instead of Ollama)
+    # Generation step - EXACTLY THE SAME LOGIC, just using Groq instead of Ollama
     if st.session_state.is_typing:
         user_q = (st.session_state.pending_user_q or "").strip()
         if not user_q:
@@ -702,7 +715,7 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        # EXACT SAME PROMPT AS PHI3:MINI VERSION
+        # EXACT SAME PROMPT AS ORIGINAL PHI3:MINI VERSION
         prompt = f"""{SYSTEM_PROMPT}
 
 CONTEXT:
@@ -717,8 +730,14 @@ ANSWER:
         with st.spinner("Generating answer with Groq..."):
             try:
                 answer = groq_generate(prompt)
+                # Debug: Show the prompt and answer
+                with st.expander("Debug: See prompt and response"):
+                    st.write("**Prompt sent to Groq:**")
+                    st.code(prompt[:500] + "..." if len(prompt) > 500 else prompt)
+                    st.write("**Response received:**")
+                    st.code(answer)
             except Exception as e:
-                answer = f"Error: {type(e).__name__}: {str(e)[:300]}"
+                answer = f"Error generating answer: {type(e).__name__}: {str(e)[:300]}"
                 conf = {"confidence": 0}
 
         st.session_state.chat.append(
