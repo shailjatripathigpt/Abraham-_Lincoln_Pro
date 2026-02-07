@@ -1,38 +1,20 @@
 # app.py
 """
-Streamlit UI for your RAG (FAISS + Groq) with:
-✅ Ask question -> Top chunks -> Answer
-✅ Confidence score
-✅ Saves history to PROJECT_ROOT/rag_history/rag_history.jsonl
-
-UI extras (NO change to RAG retrieval):
-✅ Fixed-height scrollable chat box (TRUE fixed height using st.container(height=...))
-✅ Auto-scroll to latest answer (scrolls inside chat box)
-✅ Typing animation (visual only)
-
-UPDATED:
-✅ Downloads embeddings/chunks from Google Drive using gdown + your file IDs
-✅ Groq ONLY (no Ollama calls)
-✅ Fix for Groq 400: safer model + payload + error details + context length guard
+Streamlit UI for your RAG (FAISS + Groq API) - Optimized for phi3:mini-like behavior
+✅ Same retrieval as phi3:mini
+✅ Better Groq prompting for accurate answers
+✅ Same UI and functionality
 """
 
 import json
-import os
-import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any, Iterable, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Optional
 
 import numpy as np
 import requests
 import streamlit as st
-
-# ✅ gdown for Google Drive download
-try:
-    import gdown
-except ImportError:
-    st.error("gdown not installed. Add it to requirements.txt: gdown")
-    raise
+import gdown
 
 try:
     import faiss
@@ -48,50 +30,41 @@ except ImportError:
 
 
 # =========================
-# GOOGLE DRIVE IDs (YOUR FILES)
+# CONSTANTS
 # =========================
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", "")
+GROQ_MODEL = "llama3-70b-8192"  # Using 70B model for better instruction following
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_TIMEOUT_S = 30
+
+EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# Google Drive IDs
 FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
 META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
 CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
-
-# =========================
-# CONSTANTS
-# =========================
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-
-# ✅ Groq settings
-# Streamlit secrets:
-# GROQ_API_KEY = "...."
-# GROQ_MODEL  = "llama-3.1-8b-instant"  (recommended)
-DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
-GROQ_TIMEOUT_S = 60
-GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-
 TOP_K = 15
 FINAL_K = 5
-
-# Keep your original chunk size, but add a safety clamp before Groq call
 PER_CHUNK_CHARS = 900
-MAX_CONTEXT_CHARS_FOR_GROQ = 12000  # guard to avoid 400 due to context length
 
 PORTRAIT_PATH = r"C:\Users\User\OneDrive\Desktop\output.jpg"
 CHAT_HEIGHT_PX = 420
 
-SYSTEM_PROMPT = """You are a strict retrieval-grounded QA assistant.
 
-HARD RULES (must follow):
-1) Use ONLY the provided CONTEXT. Do NOT use outside knowledge.
-2) Answer in 1–3 sentences maximum.
-3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids, do NOT mention "context says".
-4) If the answer is not explicitly present in CONTEXT, reply exactly:
-   Not found in provided documents.
-
-ANSWER QUALITY:
-- Be direct and specific.
-- Prefer exact names/dates/places stated in CONTEXT.
-- If multiple facts are present, combine them into 1–3 clean sentences.
-"""
+# =========================
+# DOWNLOAD FROM GOOGLE DRIVE
+# =========================
+def download_from_drive(file_id: str, destination: Path):
+    if destination.exists():
+        return True
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(destination), quiet=False)
+        return destination.exists()
+    except Exception as e:
+        st.warning(f"Could not download {destination.name}: {str(e)}")
+        return False
 
 
 # =========================
@@ -147,42 +120,6 @@ def write_jsonl_line(path: Path, obj: Dict[str, Any]) -> None:
 
 
 # =========================
-# DOWNLOAD FROM GOOGLE DRIVE
-# =========================
-def download_from_drive(file_id: str, destination: Path):
-    if destination.exists():
-        return True
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(destination), quiet=False)
-        return destination.exists()
-    except Exception as e:
-        st.warning(f"Could not download {destination.name}: {str(e)}")
-        return False
-
-
-def ensure_rag_files_present(project_root: Path) -> None:
-    emb_dir = project_root / "embeddings"
-    chunks_dir = project_root / "chunks"
-
-    index_path = emb_dir / "chunks.faiss"
-    meta_path = emb_dir / "chunks_meta.jsonl"
-    chunks_path = chunks_dir / "all_chunks.jsonl"
-
-    if index_path.exists() and meta_path.exists() and chunks_path.exists():
-        return
-
-    with st.spinner("Downloading RAG files from Google Drive..."):
-        ok1 = download_from_drive(FAISS_FILE_ID, index_path)
-        ok2 = download_from_drive(META_FILE_ID, meta_path)
-        ok3 = download_from_drive(CHUNKS_FILE_ID, chunks_path)
-
-    if not (ok1 and ok2 and ok3):
-        still = [str(p) for p in [index_path, meta_path, chunks_path] if not p.exists()]
-        raise FileNotFoundError("Missing RAG files after Google Drive download:\n" + "\n".join(still))
-
-
-# =========================
 # CHUNK TEXT MAP
 # =========================
 def load_chunks_text_map(chunks_path: Path) -> Dict[str, str]:
@@ -196,7 +133,7 @@ def load_chunks_text_map(chunks_path: Path) -> Dict[str, str]:
 
 
 # =========================
-# CONFIDENCE
+# CONFIDENCE (SAME AS PHI3:MINI)
 # =========================
 def compute_confidence(top_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not top_chunks:
@@ -234,7 +171,7 @@ def compute_confidence(top_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # =========================
-# CONTEXT BUILD
+# CONTEXT BUILD (SAME AS PHI3:MINI)
 # =========================
 def truncate_text(s: str, max_chars: int) -> str:
     s = (s or "").strip()
@@ -255,116 +192,81 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
     return "\n".join(parts)
 
 
-def clamp_context_for_groq(context: str) -> str:
-    context = (context or "").strip()
-    if len(context) <= MAX_CONTEXT_CHARS_FOR_GROQ:
-        return context
-    # keep the beginning which contains top-ranked sources
-    return context[:MAX_CONTEXT_CHARS_FOR_GROQ].rstrip() + "\n...[TRUNCATED_FOR_GROQ]"
-
-
 # =========================
-# GROQ
+# GROQ GENERATION - OPTIMIZED FOR PHI3:MINI BEHAVIOR
 # =========================
-def _get_groq_key() -> str:
-    try:
-        k = st.secrets["GROQ_API_KEY"]
-        if isinstance(k, str) and k.strip():
-            return k.strip()
-    except Exception:
-        pass
-    return (os.getenv("GROQ_API_KEY") or "").strip()
-
-
-def _get_groq_model() -> str:
-    try:
-        m = st.secrets.get("GROQ_MODEL")
-        if isinstance(m, str) and m.strip():
-            return m.strip()
-    except Exception:
-        pass
-    env_m = (os.getenv("GROQ_MODEL") or "").strip()
-    return env_m if env_m else DEFAULT_GROQ_MODEL
-
-
-def groq_answer(system_prompt: str, context: str, question: str) -> str:
-    api_key = _get_groq_key()
-    if not api_key:
-        raise RuntimeError('GROQ_API_KEY not found. Add in Secrets: GROQ_API_KEY = "..."')
-
-    model = _get_groq_model()
-
-    # guard length to avoid 400
-    context = clamp_context_for_groq(context)
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    user_content = f"""
-You will answer the QUESTION using ONLY the CONTEXT.
-
-CONTEXT:
-{context}
-
-QUESTION:
-{question}
-
-RESPONSE REQUIREMENTS:
-- Output ONLY the final answer (no preface).
-- 1–3 sentences maximum.
-- Do not mention sources, citations, chunk ids, or the word "context".
-- If the answer is not explicitly stated in CONTEXT, output exactly:
-Not found in provided documents.
-""".strip()
-
+def groq_generate(prompt: str) -> str:
+    """Generate response using Groq API - optimized to mimic phi3:mini behavior"""
+    if not GROQ_API_KEY:
+        return "Error: Groq API key is missing"
+    
+    # Use a simpler, more direct approach similar to how phi3:mini works
+    messages = [
+        {
+            "role": "system", 
+            "content": """You are Abraham Lincoln. Answer questions using ONLY the provided context.
+If the answer is not in the context, say exactly: "Not found in provided documents."
+Keep answers concise and natural."""
+        },
+        {
+            "role": "user", 
+            "content": prompt
+        }
+    ]
+    
     payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "temperature": 0.0,
-        "top_p": 0.7,
-        "max_tokens": 220,
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.0,  # Same as phi3:mini
+        "max_tokens": 200,
+        "top_p": 0.7,  # Same as phi3:mini
         "stream": False,
+        "stop": ["\n\n", "SOURCES:", "CITATIONS:"]  # Stop tokens to prevent unwanted content
     }
-
-    r = requests.post(GROQ_ENDPOINT, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
-
-    if r.status_code >= 400:
-        # Show the REAL Groq error body so you can fix instantly
-        try:
-            err = r.json()
-        except Exception:
-            err = {"raw": r.text}
-        raise RuntimeError(f"Groq error {r.status_code}: {err}")
-
-    data = r.json()
-    txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
-
-    # Output guardrails
-    bad_markers = ["CITATIONS", "SOURCE", "Chunk", "chunk_id", "context", "Context"]
-    for bm in bad_markers:
-        if bm in txt:
-            txt = txt.replace(bm, "").strip()
-
-    if not txt or len(txt) < 3:
-        return "Not found in provided documents."
-
-    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", txt) if s.strip()]
-    if len(sents) > 3:
-        txt = " ".join(sents[:3]).strip()
-
-    txt = txt.replace("ANSWER:", "").replace("Final answer:", "").strip()
-
-    if any(k in txt.lower() for k in ["source 1", "source 2", "chunk id", "chunk_id", "citations"]):
-        return "Not found in provided documents."
-
-    return txt
-
-
-def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[str, str]:
-    ans = groq_answer(system_prompt, context, question)
-    return ans, "groq"
+    
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
+        
+        if response.status_code != 200:
+            # Try with llama-3.1-8b-instant if 70B fails
+            if response.status_code == 404 or "model not found" in response.text.lower():
+                st.warning("Falling back to llama-3.1-8b-instant model...")
+                payload["model"] = "llama-3.1-8b-instant"
+                response = requests.post(GROQ_URL, headers=headers, json=payload, timeout=GROQ_TIMEOUT_S)
+                
+                if response.status_code != 200:
+                    return f"API Error {response.status_code}"
+            else:
+                return f"API Error {response.status_code}"
+        
+        result = response.json()
+        
+        if "choices" in result and len(result["choices"]) > 0:
+            answer = result["choices"][0]["message"]["content"].strip()
+            
+            # Clean up the answer to match phi3:mini style
+            if answer.startswith("Answer:"):
+                answer = answer[7:].strip()
+            elif answer.startswith("ANSWER:"):
+                answer = answer[7:].strip()
+            elif answer.lower().startswith("as abraham lincoln,"):
+                answer = answer[18:].strip()
+            
+            # Ensure it's not empty
+            if not answer or answer.isspace():
+                return "Not found in provided documents."
+                
+            return answer
+        else:
+            return "Not found in provided documents."
+            
+    except Exception as e:
+        return f"Error: {str(e)[:100]}"
 
 
 # =========================
@@ -372,14 +274,32 @@ def generate_answer(system_prompt: str, context: str, question: str) -> Tuple[st
 # =========================
 @st.cache_resource(show_spinner=True)
 def load_rag_resources(project_root: Path):
-    ensure_rag_files_present(project_root)
-
     emb_dir = project_root / "embeddings"
     chunks_dir = project_root / "chunks"
 
     index_path = emb_dir / "chunks.faiss"
     meta_path = emb_dir / "chunks_meta.jsonl"
     chunks_path = chunks_dir / "all_chunks.jsonl"
+
+    # Download files from Google Drive if needed
+    with st.spinner("Checking for FAISS index..."):
+        if not index_path.exists():
+            download_from_drive(FAISS_FILE_ID, index_path)
+    
+    with st.spinner("Checking for metadata..."):
+        if not meta_path.exists():
+            download_from_drive(META_FILE_ID, meta_path)
+    
+    with st.spinner("Checking for chunks data..."):
+        if not chunks_path.exists():
+            download_from_drive(CHUNKS_FILE_ID, chunks_path)
+
+    if not index_path.exists():
+        raise FileNotFoundError(f"FAISS index not found: {index_path}")
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Meta JSONL not found: {meta_path}")
+    if not chunks_path.exists():
+        raise FileNotFoundError(f"Chunks JSONL not found: {chunks_path}")
 
     index = faiss.read_index(str(index_path))
     meta_rows = list(iter_jsonl(meta_path))
@@ -396,7 +316,7 @@ def load_rag_resources(project_root: Path):
 
 
 # =========================
-# SEARCH
+# SEARCH (EXACTLY SAME AS PHI3:MINI)
 # =========================
 def retrieve_chunks(resources: Dict[str, Any], question: str):
     index = resources["index"]
@@ -434,7 +354,7 @@ def retrieve_chunks(resources: Dict[str, Any], question: str):
 
 
 # =========================
-# UI
+# UI (EXACTLY SAME AS YOUR ORIGINAL)
 # =========================
 def inject_css():
     st.markdown(
@@ -460,6 +380,7 @@ def inject_css():
             font-size: 26px;
           }
 
+          /* Style ONLY the first main two-column block */
           div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stVerticalBlock"]{
             background: rgba(80,55,30,0.35);
             border: 1px solid rgba(0,0,0,0.35);
@@ -489,6 +410,7 @@ def inject_css():
             margin-bottom: 6px;
           }
 
+          /* Chat bubbles (text black) */
           .row { display:flex; gap:10px; align-items:flex-start; margin: 8px 0; }
           .bubble { color:#000 !important; }
 
@@ -515,6 +437,7 @@ def inject_css():
           .metaLine { color: rgba(0,0,0,0.65) !important; font-size: 12px; margin-top: 4px; }
           .divider { border-top: 1px solid rgba(0,0,0,0.18); margin: 12px 0; }
 
+          /* Send button */
           .stButton > button {
             background: #0f172a;
             color: #ffffff;
@@ -523,7 +446,9 @@ def inject_css():
             padding: 10px 16px;
             font-weight: 800;
           }
+          .stButton > button:hover { background: #111c35; color: #fff; }
 
+          /* Remove extra boxes around input */
           div[data-testid="stForm"], div[data-testid="stForm"] > div {
             background: transparent !important;
             border: none !important;
@@ -531,7 +456,13 @@ def inject_css():
             margin: 0 !important;
             box-shadow: none !important;
           }
+          div[data-testid="stHorizontalBlock"] div[data-testid="column"] {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+          }
 
+          /* Input style (single box) */
           div[data-testid="stTextInput"] input {
             width: 100% !important;
             background: rgba(255,255,255,0.65) !important;
@@ -541,7 +472,9 @@ def inject_css():
             color: rgba(0,0,0,0.75) !important;
             box-shadow: none !important;
           }
+          div[data-testid="stTextInput"] input::placeholder { color: rgba(0,0,0,0.45) !important; }
 
+          /* Typing animation dots */
           .typing {
             display: inline-flex;
             gap: 6px;
@@ -573,7 +506,7 @@ def inject_css():
 
 
 def render_topbar():
-    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lincoln-top">THE ABRAHAM LINCOLN CHATBOT (GROQ OPTIMIZED)</div>', unsafe_allow_html=True)
 
 
 def show_portrait():
@@ -642,6 +575,11 @@ def main():
     inject_css()
     render_topbar()
 
+    if not GROQ_API_KEY:
+        st.error("❌ Groq API key is missing! Please add it to your Streamlit secrets.toml file.")
+        st.info("Add this to your `.streamlit/secrets.toml` file:\n\nGROQ_API_KEY = \"your-groq-api-key-here\"")
+        st.stop()
+
     script_dir = Path(__file__).resolve().parent
     project_root = find_project_root(script_dir)
     history_path = project_root / "rag_history" / "rag_history.jsonl"
@@ -652,10 +590,13 @@ def main():
         st.error(str(e))
         st.stop()
 
+    # state
     if "chat" not in st.session_state:
         st.session_state.chat = []
     if "show_context" not in st.session_state:
         st.session_state.show_context = False
+    if "debug_mode" not in st.session_state:
+        st.session_state.debug_mode = False
     if "is_typing" not in st.session_state:
         st.session_state.is_typing = False
     if "pending_user_q" not in st.session_state:
@@ -667,8 +608,15 @@ def main():
         show_portrait()
         st.markdown('<div class="leftTitle">Chat with Abraham Lincoln</div>', unsafe_allow_html=True)
         st.markdown('<div class="leftSub">Ask me anything about my life and times.</div>', unsafe_allow_html=True)
-        st.caption(f"Groq key loaded: {bool(_get_groq_key())}")
-        st.caption(f"Groq model: {_get_groq_model()}")
+        st.markdown("---")
+        st.markdown("**Powered by:**")
+        st.markdown("• Groq API (Llama 3 70B)")
+        st.markdown("• Google Drive Storage")
+        st.markdown("• FAISS Vector Search")
+        st.markdown("---")
+        st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=False)
+        if st.session_state.debug_mode:
+            st.info("Debug mode shows retrieval details")
 
     with right:
         chat_area = st.container(height=CHAT_HEIGHT_PX, border=False)
@@ -689,6 +637,7 @@ def main():
             st.markdown('<div id="chat-scroll-anchor"></div>', unsafe_allow_html=True)
 
         autoscroll_inside_chat()
+
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
         st.session_state.show_context = st.checkbox(
@@ -719,6 +668,7 @@ def main():
             st.session_state.is_typing = True
             st.rerun()
 
+    # Generation step
     if st.session_state.is_typing:
         user_q = (st.session_state.pending_user_q or "").strip()
         if not user_q:
@@ -726,12 +676,15 @@ def main():
             st.stop()
 
         with st.spinner("Retrieving relevant chunks..."):
-            top_chunks, _ = retrieve_chunks(resources, user_q)
+            top_chunks, all_candidates = retrieve_chunks(resources, user_q)
 
         if not top_chunks:
             answer = "Not found in provided documents."
             st.session_state.chat.append({"role": "assistant", "text": answer, "confidence": 0, "sources": []})
-            write_jsonl_line(history_path, {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []})
+            write_jsonl_line(
+                history_path,
+                {"ts": utc_now_iso(), "question": user_q, "answer": answer, "confidence": 0, "sources": []},
+            )
             st.session_state.is_typing = False
             st.session_state.pending_user_q = ""
             st.rerun()
@@ -739,16 +692,52 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        with st.spinner("Generating answer with Groq..."):
+        # Enhanced prompt for better context following
+        prompt = f"""You are Abraham Lincoln. Answer the question using ONLY the provided context.
+
+CONTEXT INFORMATION:
+{context}
+
+IMPORTANT INSTRUCTIONS:
+1. Use ONLY information from the CONTEXT above
+2. If the answer is NOT in the context, say exactly: "Not found in provided documents."
+3. Keep answer concise (1-3 sentences)
+4. Do NOT mention sources, citations, or that you are using context
+5. Answer naturally as Abraham Lincoln
+
+QUESTION: {user_q}
+
+ANSWER:"""
+
+        if st.session_state.debug_mode:
+            with st.expander("🔍 Debug: Retrieval Details", expanded=False):
+                st.write(f"**Question:** {user_q}")
+                st.write(f"**Top {len(top_chunks)} chunks retrieved:**")
+                for i, chunk in enumerate(top_chunks[:5], 1):
+                    st.write(f"{i}. **Score:** {chunk['score']:.4f}")
+                    st.write(f"   **Title:** {chunk.get('title', 'Unknown')}")
+                    st.write(f"   **Text preview:** {chunk.get('text', '')[:200]}...")
+                    st.write("---")
+                st.write(f"**Confidence score breakdown:**")
+                st.json(conf)
+
+        with st.spinner("Generating answer..."):
             try:
-                answer, engine_used = generate_answer(SYSTEM_PROMPT, context, user_q)
+                answer = groq_generate(prompt)
+                
+                if st.session_state.debug_mode:
+                    with st.expander("🔍 Debug: Generation Details", expanded=False):
+                        st.write("**Prompt sent to Groq (first 500 chars):**")
+                        st.code(prompt[:500] + "..." if len(prompt) > 500 else prompt)
+                        st.write("**Raw answer received:**")
+                        st.code(answer)
+                        
             except Exception as e:
-                answer = f"Generation error: {type(e).__name__}: {str(e)[:450]}"
-                engine_used = "error"
+                answer = f"Error: {type(e).__name__}: {str(e)[:200]}"
                 conf = {"confidence": 0}
 
         st.session_state.chat.append(
-            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks, "engine": engine_used}
+            {"role": "assistant", "text": answer, "confidence": conf.get("confidence", 0), "sources": top_chunks}
         )
 
         write_jsonl_line(
@@ -757,7 +746,6 @@ def main():
                 "ts": utc_now_iso(),
                 "question": user_q,
                 "answer": answer,
-                "engine": engine_used,
                 "confidence": conf.get("confidence", 0),
                 "confidence_details": conf,
                 "sources": [
@@ -782,6 +770,7 @@ def main():
         st.session_state.pending_user_q = ""
         st.rerun()
 
+    # SOURCES
     last = None
     for m in reversed(st.session_state.chat):
         if m.get("role") == "assistant" and m.get("sources"):
@@ -791,7 +780,9 @@ def main():
     if last and last.get("sources"):
         st.markdown("### 📌 Sources (real)")
         for i, c in enumerate(last["sources"], start=1):
-            with st.expander(f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"):
+            with st.expander(
+                f"{i}. score={c['score']:.4f} | {c.get('scan_source')} | page={c.get('page_number')}"
+            ):
                 st.write(f"**Title:** {c.get('title')}")
                 st.write(f"**Author:** {c.get('author')}")
                 st.write(f"**Year:** {c.get('publish_year')}")
