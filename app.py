@@ -67,8 +67,6 @@ RULES (must follow):
 3) Do NOT write "CITATIONS:", do NOT mention SOURCE numbers, do NOT mention chunk ids.
 4) If the answer is not explicitly present in CONTEXT, reply exactly:
    Not found in provided documents.
-5) Make your answer clear, concise, and directly based on the context provided.
-6) If the context contains relevant information, synthesize it into a coherent answer.
 """
 
 
@@ -220,21 +218,24 @@ def build_context(top_chunks: List[Dict[str, Any]], per_chunk_chars: int) -> str
 
 
 # =========================
-# GROQ GENERATION
+# GROQ GENERATION - FIXED TO MATCH PHI3:MINI FORMAT
 # =========================
 def groq_generate(prompt: str) -> str:
-    """Generate response using Groq API with improved prompt formatting"""
+    """Generate response using Groq API - using same prompt format as phi3:mini"""
     if not GROQ_API_KEY:
         raise ValueError("Groq API key is missing")
     
-    # Create a well-formatted prompt for Groq
+    # Use the EXACT same prompt format that worked with phi3:mini
+    # The prompt already contains the system instructions at the beginning
+    # So we just need to send it as a user message
+    
     messages = [
         {
-            "role": "system",
-            "content": SYSTEM_PROMPT
+            "role": "system", 
+            "content": "You are a helpful assistant that answers questions based on the provided context."
         },
         {
-            "role": "user",
+            "role": "user", 
             "content": prompt
         }
     ]
@@ -242,9 +243,9 @@ def groq_generate(prompt: str) -> str:
     payload = {
         "model": GROQ_MODEL,
         "messages": messages,
-        "temperature": 0.1,  # Lower temperature for more factual responses
+        "temperature": 0.0,  # EXACTLY same as phi3:mini (0.0 for deterministic)
         "max_tokens": 300,
-        "top_p": 0.9,
+        "top_p": 0.7,  # EXACTLY same as phi3:mini
         "stream": False
     }
     
@@ -266,15 +267,13 @@ def groq_generate(prompt: str) -> str:
         if "choices" in result and len(result["choices"]) > 0:
             answer = result["choices"][0]["message"]["content"].strip()
             
-            # Clean up the answer
-            if answer.startswith("Answer:"):
-                answer = answer[7:].strip()
-            if answer.startswith("ANSWER:"):
+            # Remove any prefix if present
+            if answer.lower().startswith("answer:"):
                 answer = answer[7:].strip()
                 
             return answer
         else:
-            raise ValueError("No response from Groq API")
+            return "Error: No response from Groq API"
             
     except requests.exceptions.RequestException as e:
         raise ConnectionError(f"Groq API connection error: {str(e)}")
@@ -703,15 +702,17 @@ def main():
         conf = compute_confidence(top_chunks)
         context = build_context(top_chunks, per_chunk_chars=PER_CHUNK_CHARS)
 
-        # Build a better formatted prompt for Groq
+        # EXACT SAME PROMPT AS PHI3:MINI VERSION
         prompt = f"""{SYSTEM_PROMPT}
 
-CONTEXT INFORMATION:
+CONTEXT:
 {context}
 
-USER QUESTION: {user_q}
+QUESTION:
+{user_q}
 
-Based ONLY on the context above, provide a clear and concise answer:"""
+ANSWER:
+"""
 
         with st.spinner("Generating answer with Groq..."):
             try:
