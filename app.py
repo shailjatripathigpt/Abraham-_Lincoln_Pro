@@ -16,19 +16,18 @@ from sentence_transformers import SentenceTransformer
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 FINAL_K = 5
 
-# Google Drive file IDs
+# Google Drive IDs
 FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
 META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
 CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
-# ✅ Mistral model (stable)
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/mistralai/Mistral-7B-Instruct-v0.3"
+# ✅ WORKING FREE HF MODEL
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/google/flan-t5-large"
 
 HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
 
-SYSTEM_PROMPT = """You are a strict retrieval QA assistant.
-Answer ONLY from the provided context.
-If not found, reply exactly:
+SYSTEM_PROMPT = """Answer ONLY using the context.
+If answer not present say:
 Not found in provided documents.
 """
 
@@ -36,7 +35,7 @@ Not found in provided documents.
 # =========================
 # DOWNLOAD HELPERS
 # =========================
-def download_from_drive(file_id: str, dest: Path, label: str):
+def download_from_drive(file_id, dest, label):
     if dest.exists():
         return
 
@@ -46,22 +45,19 @@ def download_from_drive(file_id: str, dest: Path, label: str):
     with st.spinner(f"Downloading {label}..."):
         gdown.download(url, str(dest), quiet=False)
 
-    if not dest.exists():
-        raise FileNotFoundError(f"{label} failed to download")
-
 
 # =========================
 # JSONL LOADER
 # =========================
-def iter_jsonl(path: Path):
-    with path.open("r", encoding="utf-8") as f:
+def iter_jsonl(path):
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 yield json.loads(line)
 
 
 # =========================
-# LOAD RAG RESOURCES
+# LOAD RESOURCES
 # =========================
 @st.cache_resource
 def load_resources():
@@ -74,7 +70,7 @@ def load_resources():
     meta_path = emb / "chunks_meta.jsonl"
     chunks_path = ch / "all_chunks.jsonl"
 
-    download_from_drive(FAISS_FILE_ID, index_path, "FAISS index")
+    download_from_drive(FAISS_FILE_ID, index_path, "FAISS")
     download_from_drive(META_FILE_ID, meta_path, "Metadata")
     download_from_drive(CHUNKS_FILE_ID, chunks_path, "Chunks")
 
@@ -88,15 +84,15 @@ def load_resources():
 
 
 # =========================
-# RETRIEVAL
+# RETRIEVE
 # =========================
 def retrieve(index, meta, texts, model, query):
 
-    emb = model.encode([query], convert_to_numpy=True).astype("float32")
+    emb = model.encode([query]).astype("float32")
     D, I = index.search(emb, FINAL_K)
 
     results = []
-    for score, idx in zip(D[0], I[0]):
+    for idx in I[0]:
         if idx < len(meta):
             cid = meta[idx]["chunk_id"]
             txt = texts.get(cid)
@@ -119,9 +115,8 @@ def hf_generate(prompt):
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 200,
-            "temperature": 0.2,
-            "return_full_text": False,
+            "max_new_tokens": 150,
+            "temperature": 0.3,
         },
     }
 
@@ -137,7 +132,7 @@ def hf_generate(prompt):
 
     data = r.json()
 
-    if isinstance(data, list) and len(data) > 0:
+    if isinstance(data, list):
         return data[0]["generated_text"]
 
     return str(data)
@@ -152,7 +147,7 @@ def main():
     st.title("🇺🇸 Abraham Lincoln RAG Chatbot")
 
     if not HF_TOKEN:
-        st.error("HF_TOKEN missing in Streamlit secrets!")
+        st.error("HF_TOKEN missing in secrets!")
         st.stop()
 
     index, meta, texts, model = load_resources()
@@ -161,23 +156,23 @@ def main():
 
     if st.button("Send") and q:
 
-        ctx_chunks = retrieve(index, meta, texts, model, q)
+        ctx = retrieve(index, meta, texts, model, q)
 
-        if not ctx_chunks:
+        if not ctx:
             st.write("Not found in provided documents.")
             return
 
-        context = "\n".join(ctx_chunks)
+        context = "\n".join(ctx)
 
         prompt = f"""{SYSTEM_PROMPT}
 
-CONTEXT:
+Context:
 {context}
 
-QUESTION:
+Question:
 {q}
 
-ANSWER:
+Answer:
 """
 
         with st.spinner("Generating answer..."):
@@ -189,4 +184,3 @@ ANSWER:
 
 if __name__ == "__main__":
     main()
-
