@@ -5,7 +5,6 @@ import requests
 import streamlit as st
 import gdown
 import os
-
 import faiss
 from sentence_transformers import SentenceTransformer
 
@@ -21,10 +20,7 @@ FAISS_FILE_ID = "1Zvt2fP0ih70dGFXoIvuDX27427wQUYym"
 META_FILE_ID = "1bVrE_JFgdK0kdZaaHCBxPItfPda_xxvo"
 CHUNKS_FILE_ID = "16eTgJEilBGdH6dmgkoH92bY5N87T7-Wm"
 
-# ✅ WORKING FREE HF MODEL
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/google/flan-t5-large"
-
-HF_TOKEN = st.secrets.get("HF_TOKEN", os.getenv("HF_TOKEN"))
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
 
 SYSTEM_PROMPT = """Answer ONLY using the context.
 If answer not present say:
@@ -33,27 +29,13 @@ Not found in provided documents.
 
 
 # =========================
-# DOWNLOAD HELPERS
+# DOWNLOAD FROM DRIVE
 # =========================
-def download_from_drive(file_id, dest, label):
+def download_from_drive(fid, dest):
     if dest.exists():
         return
-
     dest.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://drive.google.com/uc?id={file_id}"
-
-    with st.spinner(f"Downloading {label}..."):
-        gdown.download(url, str(dest), quiet=False)
-
-
-# =========================
-# JSONL LOADER
-# =========================
-def iter_jsonl(path):
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                yield json.loads(line)
+    gdown.download(f"https://drive.google.com/uc?id={fid}", str(dest), quiet=False)
 
 
 # =========================
@@ -62,21 +44,21 @@ def iter_jsonl(path):
 @st.cache_resource
 def load_resources():
 
-    root = Path(".")
-    emb = root / "embeddings"
-    ch = root / "chunks"
+    emb = Path("embeddings")
+    ch = Path("chunks")
 
     index_path = emb / "chunks.faiss"
     meta_path = emb / "chunks_meta.jsonl"
     chunks_path = ch / "all_chunks.jsonl"
 
-    download_from_drive(FAISS_FILE_ID, index_path, "FAISS")
-    download_from_drive(META_FILE_ID, meta_path, "Metadata")
-    download_from_drive(CHUNKS_FILE_ID, chunks_path, "Chunks")
+    download_from_drive(FAISS_FILE_ID, index_path)
+    download_from_drive(META_FILE_ID, meta_path)
+    download_from_drive(CHUNKS_FILE_ID, chunks_path)
 
     index = faiss.read_index(str(index_path))
-    meta = list(iter_jsonl(meta_path))
-    texts = {r["chunk_id"]: r["text"] for r in iter_jsonl(chunks_path)}
+
+    meta = [json.loads(l) for l in open(meta_path)]
+    texts = {r["chunk_id"]: r["text"] for r in map(json.loads, open(chunks_path))}
 
     model = SentenceTransformer(EMBED_MODEL_NAME)
 
@@ -86,56 +68,46 @@ def load_resources():
 # =========================
 # RETRIEVE
 # =========================
-def retrieve(index, meta, texts, model, query):
+def retrieve(index, meta, texts, model, q):
 
-    emb = model.encode([query]).astype("float32")
-    D, I = index.search(emb, FINAL_K)
+    emb = model.encode([q]).astype("float32")
+    _, I = index.search(emb, FINAL_K)
 
-    results = []
+    out = []
     for idx in I[0]:
         if idx < len(meta):
             cid = meta[idx]["chunk_id"]
             txt = texts.get(cid)
             if txt:
-                results.append(txt)
+                out.append(txt)
 
-    return results
+    return out
 
 
 # =========================
-# HF GENERATION
+# GROQ GENERATION
 # =========================
-def hf_generate(prompt):
+def groq_generate(prompt):
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
 
     headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
     payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 150,
-            "temperature": 0.3,
-        },
+        "model": "llama-3.1-8b-instant",  # fast & free
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
     }
 
-    r = requests.post(
-        HF_API_URL,
-        headers=headers,
-        json=payload,
-        timeout=120,
-    )
+    r = requests.post(url, headers=headers, json=payload)
 
-    if r.status_code != 200:
-        return f"HF API Error: {r.text}"
-
-    data = r.json()
-
-    if isinstance(data, list):
-        return data[0]["generated_text"]
-
-    return str(data)
+    return r.json()["choices"][0]["message"]["content"]
 
 
 # =========================
@@ -144,10 +116,10 @@ def hf_generate(prompt):
 def main():
 
     st.set_page_config(page_title="Lincoln RAG", layout="wide")
-    st.title("🇺🇸 Abraham Lincoln RAG Chatbot")
+    st.title("🇺🇸 Abraham Lincoln RAG Chatbot (Groq Powered)")
 
-    if not HF_TOKEN:
-        st.error("HF_TOKEN missing in secrets!")
+    if not GROQ_API_KEY:
+        st.error("GROQ_API_KEY missing in secrets!")
         st.stop()
 
     index, meta, texts, model = load_resources()
@@ -164,8 +136,7 @@ def main():
 
         context = "\n".join(ctx)
 
-        prompt = f"""{SYSTEM_PROMPT}
-
+        prompt = f"""
 Context:
 {context}
 
@@ -176,7 +147,7 @@ Answer:
 """
 
         with st.spinner("Generating answer..."):
-            ans = hf_generate(prompt)
+            ans = groq_generate(prompt)
 
         st.write("### Answer")
         st.write(ans)
